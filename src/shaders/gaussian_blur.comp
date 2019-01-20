@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D image_in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D image_out;
+layout(push_constant) uniform Data {
+    float size;
+    bool vertical;
+};
+
+// see http://rastergrid.com/blog/2010/09/efficient-gaussian-blur-with-linear-sampling/
+const int taps = 3;
+const float offset[3] = float[] (0.0, 1.3846153845, 3.2307692297);
+const float weight[3] = float[] (0.2270270270, 0.3162162162, 0.0702702703);
+
+vec4 gaussian(vec2 pos, vec2 dir) {
+    vec4 out_col = texture(image_in, pos) * weight[0];
+    for (int i = 1; i < taps; i++) {
+        out_col += texture(image_in, vec2(pos + (dir * offset[i]) * size)) * weight[i];
+        out_col += texture(image_in, vec2(pos - (dir * offset[i]) * size)) * weight[i];
+    }
+    return out_col;
+}
+
+void main() {
+    vec2 scale = 1. / vec2(imageSize(image_out));
+    vec2 tex_coord = (gl_GlobalInvocationID.xy + vec2(0.5)) * scale;
+    vec2 dir = vertical ? vec2(0.0, scale.y) : vec2(scale.x, 0.0);
+    imageStore(image_out, ivec2(gl_GlobalInvocationID.xy), gaussian(tex_coord, dir));
+}

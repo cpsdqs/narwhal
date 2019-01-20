@@ -1,0 +1,31 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D image_in;
+layout(set = 0, binding = 1) uniform sampler2D mask_in;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D image_out;
+layout(push_constant) uniform Data {
+    int mode;
+};
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 tex_pos = (gl_GlobalInvocationID.xy + vec2(0.5)) / imageSize(image_out);
+    vec4 pixel = texture(image_in, tex_pos);
+    vec4 mask = texture(mask_in, tex_pos);
+
+    switch (mode) {
+    case 1:
+        pixel.a *= mask.r + mask.g + mask.b / 3.;
+    case 0:
+        pixel.a *= mask.a;
+        break;
+    case 3:
+        pixel.a *= 1. - (mask.r + mask.g + mask.b) / 3.;
+    case 2:
+        pixel.a *= 1. - mask.a;
+        break;
+    }
+
+    imageStore(image_out, pos, pixel);
+}
