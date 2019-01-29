@@ -205,6 +205,16 @@ impl Renderer {
         Ok(())
     }
 
+    /// Adds a node type with a closure.
+    pub fn add_node_type_with<F: FnOnce(&Device, &Queue) -> Result<NodeType, Error>>(
+        &mut self,
+        gen: F,
+    ) -> Result<(), Error> {
+        let node_type = gen(&self.device, &self.queue)?;
+        self.node_types.insert(node_type.name(), node_type);
+        Ok(())
+    }
+
     /// Returns a mutable reference to the loaded node types.
     pub fn node_types_mut(&mut self) -> &mut HashMap<String, NodeType> {
         &mut self.node_types
