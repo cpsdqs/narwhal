@@ -132,13 +132,13 @@ impl GraphicsNode for CompositeNode {
 
         output.set(CompositeProps::Out, self.output.as_ref().unwrap().clone());
 
-        if let Ok(in_values) = input.get(CompositeProps::In) {
-            cmd_buffer = cmd_buffer.begin_render_pass(
-                Arc::clone(framebuffer),
-                false,
-                vec![Color::CLEAR.into(), 0.0.into()],
-            )?;
+        cmd_buffer = cmd_buffer.begin_render_pass(
+            Arc::clone(framebuffer),
+            false,
+            vec![Color::CLEAR.into(), 0.0.into()],
+        )?;
 
+        if let Ok(in_values) = input.get(CompositeProps::In) {
             let camera = context.camera().matrix();
             let px_width = size.x * resolution;
             let px_height = size.y * resolution;
@@ -181,9 +181,9 @@ impl GraphicsNode for CompositeNode {
                     _ => return Err(EvalError::InputType(CompositeProps::In.into())),
                 }
             }
-
-            cmd_buffer = cmd_buffer.end_render_pass()?;
         }
+
+        cmd_buffer = cmd_buffer.end_render_pass()?;
 
         Ok(cmd_buffer)
     }

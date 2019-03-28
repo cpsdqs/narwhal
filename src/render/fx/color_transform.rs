@@ -13,6 +13,8 @@ use vulkano::image::{Dimensions, ImageUsage, StorageImage};
 use vulkano::pipeline::{ComputePipeline, ComputePipelineAbstract};
 use vulkano::sampler::{BorderColor, Filter, MipmapMode, Sampler, SamplerAddressMode};
 
+// FIXME: this is not how color transforms work
+
 const LOCAL_SIZE_X: f32 = 16.;
 const LOCAL_SIZE_Y: f32 = 16.;
 
