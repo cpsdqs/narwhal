@@ -27,7 +27,7 @@ use vulkano::framebuffer::{RenderPassAbstract, Subpass};
 use vulkano::memory::pool::StdMemoryPool;
 use vulkano::memory::DeviceMemoryAllocError;
 use vulkano::pipeline::vertex::SingleBufferDefinition;
-use vulkano::pipeline::GraphicsPipeline;
+use vulkano::pipeline::{GraphicsPipeline, GraphicsPipelineBuilder};
 
 mod shape_vert {
     vulkano_shaders::shader!(ty: "vertex", path: "src/shaders/shape.vert");
@@ -433,6 +433,20 @@ struct Cached {
     camera: Matrix4<f32>,
 }
 
+pub trait GraphicsPipelineConfig {
+    fn config<A, B, C, D, E, F, G, H, I, J, K, L>(
+        builder: GraphicsPipelineBuilder<A, B, C, D, E, F, G, H, I, J, K, L>,
+    ) -> GraphicsPipelineBuilder<A, B, C, D, E, F, G, H, I, J, K, L>;
+}
+
+impl GraphicsPipelineConfig for () {
+    fn config<A, B, C, D, E, F, G, H, I, J, K, L>(
+        builder: GraphicsPipelineBuilder<A, B, C, D, E, F, G, H, I, J, K, L>,
+    ) -> GraphicsPipelineBuilder<A, B, C, D, E, F, G, H, I, J, K, L> {
+        builder
+    }
+}
+
 /// Cached tessellator and renderer of [`Shape`]s.
 pub struct ShapeRasterizer<ID: Copy + Hash + Eq> {
     device: Arc<Device>,
@@ -458,22 +472,32 @@ impl<ID: Copy + Hash + Eq> ShapeRasterizer<ID> {
         render_pass: &Arc<RenderPassAbstract + Send + Sync>,
         subpass: u32,
     ) -> Result<ShapeRasterizer<ID>, Error> {
+        Self::new_with_pipeline_config::<()>(device, render_pass, subpass)
+    }
+
+    pub fn new_with_pipeline_config<F: GraphicsPipelineConfig>(
+        device: Arc<Device>,
+        render_pass: &Arc<RenderPassAbstract + Send + Sync>,
+        subpass: u32,
+    ) -> Result<ShapeRasterizer<ID>, Error> {
         let shape_vs = shape_vert::Shader::load(Arc::clone(&device))?;
         let shape_fs = shape_frag::Shader::load(Arc::clone(&device))?;
 
         let shape_pipeline = Arc::new(
-            GraphicsPipeline::start()
-                .vertex_input_single_buffer::<ShapeVertex>()
-                .vertex_shader(shape_vs.main_entry_point(), ())
-                .viewports_scissors_dynamic(1)
-                .fragment_shader(shape_fs.main_entry_point(), ())
-                .blend_alpha_blending()
-                .depth_write(true)
-                .render_pass(
-                    Subpass::from(Arc::clone(render_pass), subpass)
-                        .expect("Subpass given to Rasterizer does not exist"),
-                )
-                .build(Arc::clone(&device))?,
+            F::config(
+                GraphicsPipeline::start()
+                    .vertex_input_single_buffer::<ShapeVertex>()
+                    .vertex_shader(shape_vs.main_entry_point(), ())
+                    .viewports_scissors_dynamic(1)
+                    .fragment_shader(shape_fs.main_entry_point(), ())
+                    .blend_alpha_blending()
+                    .depth_write(true)
+                    .render_pass(
+                        Subpass::from(Arc::clone(render_pass), subpass)
+                            .expect("Subpass given to Rasterizer does not exist"),
+                    ),
+            )
+            .build(Arc::clone(&device))?,
         );
 
         Ok(ShapeRasterizer {
