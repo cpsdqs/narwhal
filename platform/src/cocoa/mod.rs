@@ -409,8 +409,6 @@ fn nsevent_to_window_event(event: sys::NSEvent) -> Option<WindowEvent> {
                     EventType::PointerEntered
                 }
                 sys::NSEventType::MouseExited => {
-                    may_check_subtype = true;
-                    may_read_pressure = true;
                     EventType::PointerExited
                 }
                 sys::NSEventType::FlagsChanged => EventType::ModifiersChanged,
