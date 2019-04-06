@@ -13,13 +13,13 @@ use narwhal::platform::*;
 use narwhal::render::fx::MaskMode;
 use narwhal::render::*;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vulkano::device::{Device, Queue};
 use vulkano::instance::PhysicalDevice;
 use vulkano::sync::GpuFuture;
 
 struct AppData {
-    windows: Vec<Box<Window>>,
+    windows: Vec<Window>,
     phys_dev: usize,
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -27,198 +27,35 @@ struct AppData {
 
 struct WinData {
     renderer: Renderer,
-    presenter: Presenter,
+    presenter: Mutex<Presenter>,
     cam_z: f64,
 }
 
 fn main() {
-    let mut app = App::init("Narwhal Render Test", (0, 1, 0), |event, app| match event {
+    let mut app = App::init("Narwhal Render Test", (0, 1, 0), |app| {
+        for event in app.events().collect::<Vec<_>>() {
+            handle_app_event(app, event);
+        }
+    });
+
+    let (pd, device, queue) = Presenter::choose_device(app.instance()).expect("No device");
+
+    *app.data_mut() = Box::new(AppData {
+        windows: Vec::new(),
+        phys_dev: pd,
+        device,
+        queue,
+    });
+
+    app.run();
+}
+
+fn handle_app_event(app: &mut App, app_event: AppEvent) {
+    match app_event {
         AppEvent::Ready => {
-            let mut win = app.create_window(400, 400, |event, win| {
-                let win_size = win.size_f32();
-                let win_resolution = win.physical_pixel_scale() as f32;
-                let data: &mut WinData = win.data.downcast_mut().expect("Invalid window data");
+            let mut win = app.create_window(400, 400, handle_window_events);
 
-                match event {
-                    WindowEvent::Ready => {
-                        data.renderer.set_resolution(win_resolution);
-                        data.renderer.add_node_type(defs::COMPOSITE).unwrap();
-                        data.renderer.add_node_type(defs::CAMERA).unwrap();
-                        data.renderer.add_node_type(defs::MASK).unwrap();
-                        data.renderer.add_node_type(defs::GAUSSIAN_BLUR).unwrap();
-
-                        let mut cam = Node::empty(defs::CAMERA_NAME.into());
-                        cam.set(defs::CameraProps::Size.into(), win_size.into_f64());
-                        cam.set(defs::CameraProps::Offset.into(), Vector2::new(0., 0.));
-                        cam.set(
-                            defs::CameraProps::Transform.into(),
-                            Matrix4::from_translation((0., 0., data.cam_z).into()),
-                        );
-                        cam.set(defs::CameraProps::Fov.into(), 1.57079632);
-                        cam.set(defs::CameraProps::ClipNear.into(), 0.01);
-                        cam.set(defs::CameraProps::ClipFar.into(), 100.);
-
-                        let graph = data.renderer.graph_mut();
-
-                        let cam = graph.add_node(cam);
-                        graph.set_output(cam);
-
-                        let composite = Node::empty(defs::COMPOSITE_NAME.into());
-                        let composite = graph.add_node(composite);
-
-                        let mut drawables = Vec::new();
-
-                        let test_paths = test_paths();
-                        let horse_paths = horse();
-                        let mut cache_id = 0;
-                        for path in test_paths {
-                            let stroke: StrokeWeight = vec![
-                                WeightCmd::LineTo((0., 0., 0.).into()),
-                                WeightCmd::QuadTo((0.5, 1., 0.).into(), (1., 0., 0.).into()),
-                            ]
-                            .into();
-                            drawables.push(Drawable {
-                                id: (composite, cache_id),
-                                shape: Shape {
-                                    fill: None,
-                                    stroke: Some((stroke, 7., (1., 1., 1., 1.).into())),
-                                    transform: Some(Matrix4::from_translation(
-                                        (0., 0., 10.).into(),
-                                    )),
-                                    path: path.into(),
-                                },
-                            });
-                            cache_id += 1;
-                        }
-                        for path in horse_paths {
-                            let path: Path2D = path.into();
-                            drawables.push(Drawable {
-                                id: (composite, cache_id),
-                                shape: Shape {
-                                    fill: Some((0.16, 0.08, 0.04, 1.).into()),
-                                    stroke: None,
-                                    transform: Some(Matrix4::identity()),
-                                    path,
-                                },
-                            });
-                            cache_id += 1;
-                        }
-
-                        graph.node_mut(&composite).unwrap().set(0, drawables);
-
-                        let mask_comp = Node::empty(defs::COMPOSITE_NAME.into());
-                        let mask_comp = graph.add_node(mask_comp);
-                        let mask_drawables = vec![Drawable {
-                            id: (mask_comp, 0),
-                            shape: Shape {
-                                fill: Some((1., 0., 1., 1.).into()),
-                                stroke: None,
-                                transform: Some(
-                                    Matrix4::from_translation((0., 0., 100.).into())
-                                        * Matrix4::from_scale(0.5),
-                                ),
-                                path: vec![
-                                    Path2DCmd::JumpTo((0., -115.).into()),
-                                    Path2DCmd::CubicTo(
-                                        (63.51, -115.).into(),
-                                        (115., -63.51).into(),
-                                        (115., 0.).into(),
-                                    ),
-                                    Path2DCmd::CubicTo(
-                                        (115., 63.51).into(),
-                                        (63.51, 115.).into(),
-                                        (0., 115.).into(),
-                                    ),
-                                    Path2DCmd::CubicTo(
-                                        (-63.51, 115.).into(),
-                                        (-115., 63.51).into(),
-                                        (-115., 0.).into(),
-                                    ),
-                                    Path2DCmd::CubicTo(
-                                        (-115., -63.51).into(),
-                                        (-63.51, -115.).into(),
-                                        (0., -115.).into(),
-                                    ),
-                                ]
-                                .into(),
-                            },
-                        }];
-                        graph.node_mut(&mask_comp).unwrap().set(0, mask_drawables);
-
-                        let mut blur = Node::empty(defs::GAUSSIAN_BLUR_NAME.into());
-                        blur.set(defs::GaussianProps::Radius.into(), 80.);
-                        let blur = graph.add_node(blur);
-
-                        let mut mask = Node::empty(defs::MASK_NAME.into());
-                        mask.set_any(defs::MaskProps::Mode.into(), MaskMode::AlphaMatte);
-                        let mask = graph.add_node(mask);
-
-                        graph.link(mask, 1, cam, 0);
-                        graph.link(composite, 1, mask, 0);
-                        graph.link(blur, 1, mask, 2);
-                        graph.link(mask_comp, 1, blur, 0);
-                    }
-                    WindowEvent::Resized(..) => {
-                        data.renderer.set_resolution(win_resolution);
-                        let graph = data.renderer.graph_mut();
-                        let cam = graph.output();
-                        graph
-                            .node_mut(&cam)
-                            .unwrap()
-                            .set(defs::CameraProps::Size.into(), win_size.into_f64());
-                    }
-                    WindowEvent::UIEvent(event) => match event.event_type {
-                        EventType::PointerMoved => {
-                            let x = event.point.x / win_size.x as f64;
-                            let y = event.point.y / win_size.y as f64;
-
-                            let graph = data.renderer.graph_mut();
-                            let cam = graph.output();
-                            graph.node_mut(&cam).unwrap().set(
-                                defs::CameraProps::Transform.into(),
-                                Matrix4::from_angle_x(Rad(y - 0.5))
-                                    * Matrix4::from_angle_y(-Rad(x - 0.5))
-                                    * Matrix4::from_translation((0., 0., data.cam_z).into()),
-                            );
-                        }
-                        EventType::Scroll => {
-                            let dz = event.vector.unwrap().y;
-
-                            let graph = data.renderer.graph_mut();
-                            let cam = graph.output();
-                            let transform = match graph
-                                .node(&cam)
-                                .unwrap()
-                                .get(defs::CameraProps::Transform.into())
-                            {
-                                Some(Value::Mat4(t)) => *t,
-                                _ => panic!("oh no"),
-                            };
-                            graph.node_mut(&cam).unwrap().set(
-                                defs::CameraProps::Transform.into(),
-                                transform * Matrix4::from_translation((0., 0., dz).into()),
-                            );
-
-                            data.cam_z += dz;
-                        }
-                        _ => (),
-                    },
-                    _ => (),
-                }
-
-                let cmd_buffer = data.renderer.new_cmd_buffer().unwrap();
-                let (cmd_buffer, out_tex) = data.renderer.render(cmd_buffer).unwrap();
-
-                data.presenter
-                    .present(cmd_buffer, out_tex.color())
-                    .unwrap()
-                    .then_signal_fence_and_flush()
-                    .unwrap()
-                    .wait(None)
-                    .unwrap();
-            });
-
-            let data: &mut AppData = app.data.downcast_mut().expect("Invalid app data");
+            let data: &mut AppData = app.data_mut().downcast_mut().expect("Invalid app data");
 
             let renderer = Renderer::new(
                 Graph::new(),
@@ -242,24 +79,204 @@ fn main() {
                     .set_profile(profile)
                     .expect("Failed to set profile");
             }
-            win.data = Box::new(WinData {
+            *win.data_mut() = Box::new(WinData {
                 renderer,
-                presenter,
+                presenter: Mutex::new(presenter),
                 cam_z: 200.,
             });
 
             data.windows.push(win);
         }
         AppEvent::Terminating => (),
-    });
-    let (pd, device, queue) = Presenter::choose_device(app.instance()).expect("No device");
-    app.data = Box::new(AppData {
-        windows: Vec::new(),
-        phys_dev: pd,
-        device,
-        queue,
-    });
-    app.run();
+    }
+}
+
+fn handle_window_events(win: &mut Window) {
+    for event in win.events().collect::<Vec<_>>() {
+        let win_size = win.size_f32();
+        let win_resolution = win.backing_scale_factor() as f32;
+        let data: &mut WinData = win.data_mut().downcast_mut().expect("Invalid window data");
+
+        match event {
+            WindowEvent::Ready => {
+                data.renderer.set_resolution(win_resolution);
+                data.renderer.add_node_type(defs::COMPOSITE).unwrap();
+                data.renderer.add_node_type(defs::CAMERA).unwrap();
+                data.renderer.add_node_type(defs::MASK).unwrap();
+                data.renderer.add_node_type(defs::GAUSSIAN_BLUR).unwrap();
+
+                let mut cam = Node::empty(defs::CAMERA_NAME.into());
+                cam.set(defs::CameraProps::Size.into(), win_size.into_f64());
+                cam.set(defs::CameraProps::Offset.into(), Vector2::new(0., 0.));
+                cam.set(
+                    defs::CameraProps::Transform.into(),
+                    Matrix4::from_translation((0., 0., data.cam_z).into()),
+                );
+                cam.set(defs::CameraProps::Fov.into(), 1.57079632);
+                cam.set(defs::CameraProps::ClipNear.into(), 0.01);
+                cam.set(defs::CameraProps::ClipFar.into(), 100.);
+
+                let graph = data.renderer.graph_mut();
+
+                let cam = graph.add_node(cam);
+                graph.set_output(cam);
+
+                let composite = Node::empty(defs::COMPOSITE_NAME.into());
+                let composite = graph.add_node(composite);
+
+                let mut drawables = Vec::new();
+
+                let test_paths = test_paths();
+                let horse_paths = horse();
+                let mut cache_id = 0;
+                for path in test_paths {
+                    let stroke: StrokeWeight = vec![
+                        WeightCmd::LineTo((0., 0., 0.).into()),
+                        WeightCmd::QuadTo((0.5, 1., 0.).into(), (1., 0., 0.).into()),
+                    ]
+                    .into();
+                    drawables.push(Drawable {
+                        id: (composite, cache_id),
+                        shape: Shape {
+                            fill: None,
+                            stroke: Some((stroke, 7., (1., 1., 1., 1.).into())),
+                            transform: Some(Matrix4::from_translation((0., 0., 10.).into())),
+                            path: path.into(),
+                        },
+                    });
+                    cache_id += 1;
+                }
+                for path in horse_paths {
+                    let path: Path2D = path.into();
+                    drawables.push(Drawable {
+                        id: (composite, cache_id),
+                        shape: Shape {
+                            fill: Some((0.16, 0.08, 0.04, 1.).into()),
+                            stroke: None,
+                            transform: Some(Matrix4::identity()),
+                            path,
+                        },
+                    });
+                    cache_id += 1;
+                }
+
+                graph.node_mut(&composite).unwrap().set(0, drawables);
+
+                let mask_comp = Node::empty(defs::COMPOSITE_NAME.into());
+                let mask_comp = graph.add_node(mask_comp);
+                let mask_drawables = vec![Drawable {
+                    id: (mask_comp, 0),
+                    shape: Shape {
+                        fill: Some((1., 0., 1., 1.).into()),
+                        stroke: None,
+                        transform: Some(
+                            Matrix4::from_translation((0., 0., 100.).into())
+                                * Matrix4::from_scale(0.5),
+                        ),
+                        path: vec![
+                            Path2DCmd::JumpTo((0., -115.).into()),
+                            Path2DCmd::CubicTo(
+                                (63.51, -115.).into(),
+                                (115., -63.51).into(),
+                                (115., 0.).into(),
+                            ),
+                            Path2DCmd::CubicTo(
+                                (115., 63.51).into(),
+                                (63.51, 115.).into(),
+                                (0., 115.).into(),
+                            ),
+                            Path2DCmd::CubicTo(
+                                (-63.51, 115.).into(),
+                                (-115., 63.51).into(),
+                                (-115., 0.).into(),
+                            ),
+                            Path2DCmd::CubicTo(
+                                (-115., -63.51).into(),
+                                (-63.51, -115.).into(),
+                                (0., -115.).into(),
+                            ),
+                        ]
+                        .into(),
+                    },
+                }];
+                graph.node_mut(&mask_comp).unwrap().set(0, mask_drawables);
+
+                let mut blur = Node::empty(defs::GAUSSIAN_BLUR_NAME.into());
+                blur.set(defs::GaussianProps::Radius.into(), 80.);
+                let blur = graph.add_node(blur);
+
+                let mut mask = Node::empty(defs::MASK_NAME.into());
+                mask.set_any(defs::MaskProps::Mode.into(), MaskMode::AlphaMatte);
+                let mask = graph.add_node(mask);
+
+                graph.link(mask, 1, cam, 0);
+                graph.link(composite, 1, mask, 0);
+                graph.link(blur, 1, mask, 2);
+                graph.link(mask_comp, 1, blur, 0);
+            }
+            WindowEvent::Resized(..) => {
+                data.renderer.set_resolution(win_resolution);
+                let graph = data.renderer.graph_mut();
+                let cam = graph.output();
+                graph
+                    .node_mut(&cam)
+                    .unwrap()
+                    .set(defs::CameraProps::Size.into(), win_size.into_f64());
+            }
+            WindowEvent::UIEvent(event) => match event.event_type {
+                EventType::PointerMoved => {
+                    let x = event.point.x / win_size.x as f64;
+                    let y = event.point.y / win_size.y as f64;
+
+                    let graph = data.renderer.graph_mut();
+                    let cam = graph.output();
+                    graph.node_mut(&cam).unwrap().set(
+                        defs::CameraProps::Transform.into(),
+                        Matrix4::from_angle_x(Rad(y - 0.5))
+                            * Matrix4::from_angle_y(-Rad(x - 0.5))
+                            * Matrix4::from_translation((0., 0., data.cam_z).into()),
+                    );
+                }
+                EventType::Scroll => {
+                    let dz = event.vector.unwrap().y;
+
+                    let graph = data.renderer.graph_mut();
+                    let cam = graph.output();
+                    let transform = match graph
+                        .node(&cam)
+                        .unwrap()
+                        .get(defs::CameraProps::Transform.into())
+                    {
+                        Some(Value::Mat4(t)) => *t,
+                        _ => panic!("oh no"),
+                    };
+                    graph.node_mut(&cam).unwrap().set(
+                        defs::CameraProps::Transform.into(),
+                        transform * Matrix4::from_translation((0., 0., dz).into()),
+                    );
+
+                    data.cam_z += dz;
+                }
+                _ => (),
+            },
+            _ => (),
+        }
+    }
+
+    let data: &mut WinData = win.data_mut().downcast_mut().expect("Invalid window data");
+    let cmd_buffer = data.renderer.new_cmd_buffer().unwrap();
+    let (cmd_buffer, out_tex) = data.renderer.render(cmd_buffer).unwrap();
+
+    let res = data
+        .presenter
+        .lock()
+        .unwrap()
+        .present(cmd_buffer, out_tex.color())
+        .map(|f| f.then_signal_fence_and_flush().map(|f| f.wait(None)));
+
+    if let Err(err) = res {
+        println!("presenter error: {}", err);
+    }
 }
 
 fn test_paths() -> Vec<Vec<Path2DCmd>> {

@@ -38,9 +38,6 @@ pub enum WindowEvent {
 
     /// The window is about to close.
     Closing,
-
-    /// Event that means that this is a schedule callback.
-    Scheduled,
 }
 
 /// Contains possible key modifiers.

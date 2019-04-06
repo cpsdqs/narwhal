@@ -3,18 +3,17 @@
 #![allow(dead_code)]
 
 use crate::event::KeyCode;
+use cocoa::appkit::NSApplicationActivateIgnoringOtherApps;
+pub use cocoa::appkit::NSEventMask;
+use cocoa::foundation::NSDefaultRunLoopMode;
 use cocoa_ffi::appkit::CGFloat;
-use cocoa_ffi::appkit::NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps;
 use cocoa_ffi::appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular;
 use cocoa_ffi::base::{id, nil};
-use cocoa_ffi::foundation::{NSInteger, NSPoint, NSRect, NSSize, NSUInteger};
+pub use cocoa_ffi::foundation::{NSInteger, NSPoint, NSRect, NSSize, NSUInteger};
 use objc::runtime::*;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_float;
-use std::time::Duration;
 use std::{slice, str};
-
-// TODO: see what needs release-on-drop
 
 /// Converts a NSString to a Rust String.
 fn nsstring_to_string(ns_string: id) -> String {
@@ -140,6 +139,10 @@ pub const NSEventButtonMaskPenLowerSide: NSUInteger = 2;
 #[allow(non_upper_case_globals)]
 pub const NSEventButtonMaskPenUpperSide: NSUInteger = 4;
 
+pub enum NSRunLoopMode {
+    Default,
+}
+
 #[link(name = "narwhal_platform")]
 extern "C" {
     #[link_name = "OBJC_CLASS_$_NCAppEvent"]
@@ -150,6 +153,8 @@ extern "C" {
     static OBJC_NCWindowEvent: Class;
     #[link_name = "OBJC_CLASS_$_NCWindow"]
     static OBJC_NCWindow: Class;
+
+    fn NCWakeApplication();
 }
 
 #[repr(C)]
@@ -166,6 +171,8 @@ pub struct NCWindowEvent(pub id);
 pub struct NSEvent(pub id);
 #[repr(C)]
 pub struct NSColorSpace(pub id);
+#[repr(C)]
+pub struct NSDate(pub id);
 #[repr(C)]
 pub struct NSAutoreleasePool(pub id);
 #[repr(C)]
@@ -184,27 +191,66 @@ impl NSApplication {
         msg_send![self.0, setDelegate: delegate];
     }
 
-    pub fn run(&self) {
-        unsafe {
-            // required for a reason I can't remember when the app is launched
-            // without an enclosing bundle
+    pub unsafe fn wake(&mut self) {
+        NCWakeApplication();
+    }
+
+    pub unsafe fn finish_launching_and_activate(&self) {
+        let current_policy: NSInteger = msg_send![self.0, activationPolicy];
+        let mut needs_activation = false;
+        if current_policy != NSApplicationActivationPolicyRegular as NSInteger {
             msg_send![
                 self.0,
                 setActivationPolicy: NSApplicationActivationPolicyRegular
             ];
+            needs_activation = true;
+        }
 
-            // using this instead of NSApplication.activateIgnoringOtherApps
-            // somehow makes the menu bar work without refocusing the app
-            let app: id = msg_send![
+        msg_send![self.0, finishLaunching];
+
+        if needs_activation {
+            // [NSApplication activateIgnoringOtherApps:YES] would do the same thing in theory
+            // but using this method makes the menu bar work without refocusing
+            let current: id = msg_send![
                 Class::get("NSRunningApplication").unwrap(),
                 currentApplication
             ];
             msg_send![
-                app,
+                current,
                 activateWithOptions: NSApplicationActivateIgnoringOtherApps
             ];
+        }
+    }
 
-            msg_send![self.0, run];
+    pub unsafe fn run(&self) {
+        msg_send![self.0, run];
+    }
+
+    pub unsafe fn send_event(&self, event: NSEvent) {
+        msg_send![self.0, sendEvent: event];
+    }
+
+    pub unsafe fn next_event(
+        &self,
+        matching_mask: NSEventMask,
+        until_date: NSDate,
+        in_mode: NSRunLoopMode,
+        dequeue: bool,
+    ) -> Option<NSEvent> {
+        let dequeue = if dequeue { YES } else { NO };
+
+        let mode = match in_mode {
+            NSRunLoopMode::Default => NSDefaultRunLoopMode,
+        };
+
+        let i: id = msg_send![self.0, nextEventMatchingMask:matching_mask.bits()
+                                                  untilDate:until_date
+                                                     inMode:mode
+                                                    dequeue:dequeue];
+        if i == nil {
+            None
+        } else {
+            Some(NSEvent(i))
         }
     }
 }
@@ -245,8 +291,12 @@ impl NCAppDelegate {
         unsafe { msg_send![self.0, setCallbackData: data] }
     }
 
-    pub fn drain_events(&self) -> NCAppEventArray {
-        NCAppEventArray(unsafe { msg_send![self.0, drainEvents] })
+    pub fn dequeue_event(&self) -> Option<NCAppEvent> {
+        let i: id = unsafe { msg_send![self.0, dequeueEvent] };
+        if i == nil {
+            return None;
+        }
+        Some(NCAppEvent(i))
     }
 }
 
@@ -262,25 +312,15 @@ pub struct NCWindowCallbackData {
 }
 
 impl NCWindow {
-    pub fn new_metal(content_rect: NSRect, callback: extern "C" fn(NCWindow)) -> NCWindow {
+    pub fn new(content_rect: NSRect, callback: extern "C" fn(NCWindow)) -> NCWindow {
         unsafe {
             let i: id = msg_send![&OBJC_NCWindow, alloc];
             let obj = msg_send![i, initWithContentRect:content_rect
-                                             callback:callback
-                                               device:NCWindowDevice::Metal];
+                                             callback:callback];
             if obj == nil {
                 panic!("Failed to create a Metal window");
             }
             NCWindow(obj)
-        }
-    }
-
-    pub fn new_opengl(content_rect: NSRect, callback: extern "C" fn(NCWindow)) -> NCWindow {
-        unsafe {
-            let i: id = msg_send![&OBJC_NCWindow, alloc];
-            NCWindow(msg_send![i, initWithContentRect:content_rect
-                                             callback:callback
-                                               device:NCWindowDevice::OpenGL])
         }
     }
 
@@ -290,6 +330,10 @@ impl NCWindow {
 
     pub fn set_callback_data(&self, data: NCWindowCallbackData) {
         unsafe { msg_send![self.0, setCallbackData: data] }
+    }
+
+    pub fn request_frame(&self) {
+        unsafe { msg_send![self.0, requestFrame] }
     }
 
     pub fn backing_scale_factor(&self) -> CGFloat {
@@ -373,8 +417,12 @@ impl NCWindow {
         msg_send![self.0, openGLContext]
     }
 
-    pub fn drain_events(&self) -> NCWindowEventArray {
-        NCWindowEventArray(unsafe { msg_send![self.0, drainEvents] })
+    pub fn dequeue_event(&self) -> Option<NCWindowEvent> {
+        let i: id = unsafe { msg_send![self.0, dequeueEvent] };
+        if i == nil {
+            return None;
+        }
+        Some(NCWindowEvent(i))
     }
 
     pub fn title(&self) -> String {
@@ -428,6 +476,10 @@ impl NSEvent {
         unsafe { msg_send![self.0, locationInWindow] }
     }
 
+    pub fn window(&self) -> NCWindow {
+        NCWindow(unsafe { msg_send![self.0, window] })
+    }
+
     pub fn is_a_repeat(&self) -> bool {
         let v: BOOL = unsafe { msg_send![self.0, isARepeat] };
         v == YES
@@ -454,11 +506,11 @@ impl NSEvent {
     }
 
     pub fn delta_y(&self) -> CGFloat {
-        unsafe { msg_send![self.0, deltaX] }
+        unsafe { msg_send![self.0, deltaY] }
     }
 
     pub fn delta_z(&self) -> CGFloat {
-        unsafe { msg_send![self.0, deltaX] }
+        unsafe { msg_send![self.0, deltaZ] }
     }
 
     pub fn pressure(&self) -> c_float {
@@ -497,6 +549,10 @@ impl NSEvent {
             0.
         }
     }
+
+    pub fn data1(&self) -> NSInteger {
+        unsafe { msg_send![self.0, data1] }
+    }
 }
 
 impl NSColorSpace {
@@ -509,6 +565,21 @@ impl NSColorSpace {
         let len: NSUInteger = msg_send![data, length];
         let ptr: *const u8 = msg_send![data, bytes];
         slice::from_raw_parts(ptr, len as usize)
+    }
+}
+
+lazy_static! {
+    static ref OBJC_NSDATE: &'static Class = Class::get("NSDate").unwrap();
+}
+
+impl NSDate {
+    pub fn distant_future() -> NSDate {
+        let i: id = unsafe { msg_send![*OBJC_NSDATE, distantFuture] };
+        NSDate(i)
+    }
+    pub fn distant_past() -> NSDate {
+        let i: id = unsafe { msg_send![*OBJC_NSDATE, distantPast] };
+        NSDate(i)
     }
 }
 
@@ -528,149 +599,6 @@ impl NSAutoreleasePool {
 impl Drop for NSAutoreleasePool {
     fn drop(&mut self) {
         unsafe { msg_send![self.0, release] };
-    }
-}
-
-impl NCAppEventArray {
-    pub fn len(&self) -> usize {
-        let count: NSUInteger = unsafe { msg_send![self.0, count] };
-        count as usize
-    }
-    pub fn get(&self, i: usize) -> NCAppEvent {
-        let item: id = unsafe { msg_send![self.0, objectAtIndex: i as NSUInteger] };
-        NCAppEvent(item)
-    }
-}
-
-impl NCWindowEventArray {
-    pub fn len(&self) -> usize {
-        let count: NSUInteger = unsafe { msg_send![self.0, count] };
-        count as usize
-    }
-    pub fn get(&self, i: usize) -> NCWindowEvent {
-        let item: id = unsafe { msg_send![self.0, objectAtIndex: i as NSUInteger] };
-        NCWindowEvent(item)
-    }
-}
-
-impl Drop for NCAppEventArray {
-    fn drop(&mut self) {
-        unsafe { msg_send![self.0, release] };
-    }
-}
-
-impl Drop for NCWindowEventArray {
-    fn drop(&mut self) {
-        unsafe { msg_send![self.0, release] };
-    }
-}
-
-lazy_static! {
-    static ref NSNUMBER_CLASS: &'static Class = Class::get("NSNumber").unwrap();
-    static ref NSTIMER_CLASS: &'static Class = Class::get("NSTimer").unwrap();
-    pub static ref CALLBACK_MGR_CLASS: &'static Class = {
-        use objc::declare::ClassDecl;
-        use std::collections::HashMap;
-        use std::os::raw::c_void;
-
-        let ns_object = Class::get("NSObject").unwrap();
-        let mut class = ClassDecl::new("NCCallbackManager", ns_object).unwrap();
-        class.add_ivar::<*mut c_void>("callbacks");
-        class.add_ivar::<u64>("idCounter");
-        class.add_ivar::<*mut c_void>("owner");
-
-        extern "C" fn init(this: &mut Object, _: Sel) {
-            let callbacks: Box<HashMap<u64, Box<Fn(*mut ())>>> = Box::new(HashMap::new());
-            unsafe {
-                this.set_ivar("callbacks", Box::into_raw(callbacks) as *mut c_void);
-                this.set_ivar("idCounter", 0_u64);
-            }
-        }
-
-        extern "C" fn handle_timer(this: &mut Object, _: Sel, timer: id) {
-            unsafe {
-                let number: id = msg_send![timer, userInfo];
-                let callback_id: u64 = msg_send![number, unsignedLongLongValue];
-
-                let owner: *mut c_void = *this.get_ivar("owner");
-                let callbacks: *mut c_void = *this.get_mut_ivar("callbacks");
-                let callbacks = &mut *(callbacks as *mut HashMap<u64, Box<Fn(*mut ())>>);
-
-                if let Some(callback) = callbacks.remove(&callback_id) {
-                    callback(owner as *mut ());
-                } else {
-                    warn!(target: "narwhal", "[NCCallbackManager] Nonexistent callback #{} called!",
-                        callback_id);
-                }
-            }
-        }
-
-        extern "C" fn drop_timer(this: &mut Object, _: Sel) {
-            unsafe {
-                let callbacks: *mut c_void = *this.get_mut_ivar("callbacks");
-                let callbacks: &mut HashMap<_, _> =
-                    &mut *(callbacks as *mut HashMap<u64, Box<Fn(*mut ())>>);
-                drop(callbacks);
-            }
-        }
-
-        unsafe {
-            class.add_method(sel!(initRust), init as extern "C" fn(&mut Object, Sel));
-            class.add_method(
-                sel!(handleTimer:),
-                handle_timer as extern "C" fn(&mut Object, Sel, id),
-            );
-            class.add_method(sel!(release), drop_timer as extern "C" fn(&mut Object, Sel));
-        }
-
-        class.register()
-    };
-}
-
-pub struct NCCallbackManager(pub id);
-
-impl NCCallbackManager {
-    pub fn new() -> NCCallbackManager {
-        unsafe {
-            let i: id = msg_send![*CALLBACK_MGR_CLASS, alloc];
-            msg_send![i, init];
-            msg_send![i, initRust];
-            NCCallbackManager(i)
-        }
-    }
-
-    pub fn set_owner(&self, owner: *mut ()) {
-        unsafe {
-            use std::os::raw::c_void;
-
-            (*self.0).set_ivar("owner", owner as *mut c_void);
-        }
-    }
-
-    pub fn schedule_callback(&self, delay: Duration, callback: Box<Fn(*mut ())>) {
-        let delay_secs = delay.as_secs() as f64 + delay.subsec_nanos() as f64 * 1e-9;
-
-        unsafe {
-            use std::collections::HashMap;
-            use std::os::raw::c_void;
-
-            let this = &mut *self.0;
-            let callback_id: u64 = *this.get_ivar("idCounter");
-            this.set_ivar("idCounter", callback_id.wrapping_add(1));
-            let callbacks: *mut c_void = *this.get_mut_ivar("callbacks");
-            let callbacks = &mut *(callbacks as *mut HashMap<u64, Box<Fn(*mut ())>>);
-
-            callbacks.insert(callback_id, callback);
-
-            let user_info: id = msg_send![*NSNUMBER_CLASS, numberWithUnsignedLongLong: callback_id];
-            msg_send![*NSTIMER_CLASS,
-                scheduledTimerWithTimeInterval:delay_secs
-                                        target:this
-                                      selector:sel!(handleTimer:)
-                                      userInfo:user_info
-                                       repeats:NO
-            ];
-        }
     }
 }
 

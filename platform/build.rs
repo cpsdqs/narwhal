@@ -1,6 +1,6 @@
 use std::env;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn main() {
     #[cfg(target_os = "macos")]
@@ -14,10 +14,14 @@ fn build_cocoa() {
         "-xobjective-c",
         // use gnu11 language standard (Xcode seems to use it)
         "-std=gnu11",
-        // target 10.7 APIs
-        "-mmacosx-version-min=10.7",
+        // target 10.11 APIs
+        "-mmacosx-version-min=10.11",
         // use modules
         "-fmodules",
+        // use ARC
+        "-fobjc-arc",
+        // generate debug info
+        "-g",
         // don’t generate an executable
         "-c",
     ];
@@ -36,14 +40,33 @@ fn build_cocoa() {
         let mut compile_objc = |out_dir: &str, name: &str| {
             let file_path = format!("{}/src/cocoa/{}.m", proj_dir, name);
             println!("cargo:rerun-if-changed={}", file_path);
-            let status = Command::new("clang")
+
+            let output = Command::new("clang")
                 .args(&objc_args)
                 .arg(&file_path)
                 .arg("-o")
                 .arg(&format!("{}/{}.o", out_dir, name))
-                .status()
+                .stderr(Stdio::piped())
+                .output()
                 .unwrap();
-            assert!(status.success(), "clang failed");
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("{}", stderr);
+            assert!(output.status.success(), "clang failed");
+
+            // detect warnings by reading the last line which looks something like
+            // “1 warning and 1 error generated.”
+            if let Some(line) = String::from_utf8_lossy(&output.stderr).lines().last() {
+                let mut parts = line.split_whitespace();
+                let count = parts.next().unwrap_or("");
+                let warning = parts.next().unwrap_or("");
+                if warning.starts_with("warning")
+                    && count.parse::<i64>().ok().map_or(false, |n| n > 0)
+                {
+                    panic!("clang generated warnings");
+                }
+            }
+
             objects.push(format!("{}.o", name));
         };
 

@@ -1,16 +1,16 @@
 use crate::event::*;
+use crate::{App, AppCallback, Window, WindowCallback};
 use cgmath::{Point2, Vector2, Vector3};
 use cocoa_ffi::foundation::{NSPoint, NSRect, NSSize};
 use std::any::Any;
+use std::collections::VecDeque;
 use std::mem;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use vulkano::instance::loader::FunctionPointers;
 use vulkano::instance::{ApplicationInfo, Instance, InstanceExtensions, Version};
 use vulkano::statically_linked_vulkan_loader;
 use vulkano::swapchain::Surface;
-
-// TODO: support OpenGL maybe
 
 mod sys;
 
@@ -19,130 +19,178 @@ mod sys;
 /// outside of this crate.
 struct PrivateTypeForInitialUserData;
 
-type AppCallback = Fn(AppEvent, &mut App);
-fn null_app_callback(_: AppEvent, _: &mut App) {}
-
-/// The application.
-///
-/// TODO: make this Pin when Pin is stable
-pub struct App {
+pub(crate) struct CocoaApp {
     app: sys::NSApplication,
     delegate: sys::NCAppDelegate,
-    callback: Box<AppCallback>,
     instance: Arc<Instance>,
-    event_queue: Vec<AppEvent>,
+    event_queue: VecDeque<AppEvent>,
+    callback: Box<AppCallback>,
 
     /// User data; won’t be touched by anything in this crate.
     pub data: Box<Any>,
 }
 
+pub(crate) type InnerApp = Pin<Box<CocoaApp>>;
+
 extern "C" fn app_callback(delegate: sys::NCAppDelegate) {
-    let app = unsafe { &mut *(delegate.callback_data().app_ptr as *mut App) };
-
-    let events = app.delegate.drain_events();
-    for i in 0..events.len() {
-        app.event_queue.push(match events.get(i).event_type() {
-            sys::NCAppEventType::Ready => AppEvent::Ready,
-            sys::NCAppEventType::Terminating => AppEvent::Terminating,
-        });
-    }
-
-    let callback = mem::replace(&mut app.callback, Box::new(null_app_callback));
-    let event_queue = mem::replace(&mut app.event_queue, Vec::new());
-
-    for event in event_queue {
-        callback(event, app);
-    }
-
-    mem::replace(&mut app.callback, callback);
+    let app = unsafe { &mut *(delegate.callback_data().app_ptr as *mut CocoaApp) };
+    app.dequeue_events();
+    app.call_user_callback();
 }
 
 lazy_static! {
     static ref DID_INIT_APP: Mutex<bool> = Mutex::new(false);
 }
 
-impl App {
-    pub(crate) fn init_impl<F: 'static + Fn(AppEvent, &mut App)>(
-        name: &str,
-        version: (u16, u16, u16),
-        callback: F,
-    ) -> Box<App> {
-        {
-            let mut did_init = DID_INIT_APP.lock().unwrap();
-            if *did_init {
-                panic!("Cannot initialize narwhal::platform::App twice");
-            }
-            *did_init = true;
+pub(crate) fn init_app(
+    name: &str,
+    version: (u16, u16, u16),
+    callback: Box<AppCallback>,
+) -> Pin<Box<CocoaApp>> {
+    {
+        let mut did_init = DID_INIT_APP.lock().unwrap();
+        if *did_init {
+            panic!("Cannot initialize narwhal::platform::App twice");
         }
-
-        debug!(target: "narwhal", "Initializing application “{}” version {:?}", name, version);
-
-        let ns_app = sys::NSApplication::shared();
-        let app_delegate = sys::NCAppDelegate::new(app_callback);
-
-        unsafe { ns_app.set_delegate(app_delegate.0) };
-
-        app_delegate.set_dark_appearance();
-        app_delegate.set_default_main_menu(name);
-
-        let instance = Instance::with_loader(
-            FunctionPointers::new({
-                use std::os::raw::c_char;
-                use vk_sys as vk;
-                use vulkano::instance::loader::Loader;
-
-                Box::new(statically_linked_vulkan_loader!())
-            }),
-            Some(&ApplicationInfo {
-                application_name: Some(name.into()),
-                application_version: Some(Version {
-                    major: version.0,
-                    minor: version.1,
-                    patch: version.2,
-                }),
-                engine_name: None,
-                engine_version: None,
-            }),
-            &InstanceExtensions {
-                khr_surface: true,
-                mvk_macos_surface: true,
-                ..InstanceExtensions::none()
-            },
-            None,
-        )
-        .expect("Failed to create Vulkan instance");
-
-        let app = Box::new(App {
-            app: ns_app,
-            delegate: app_delegate,
-            callback: Box::new(callback),
-            instance,
-            event_queue: Vec::new(),
-            data: Box::new(PrivateTypeForInitialUserData),
-        });
-        let app_ptr = &*app as *const App as *mut ();
-        app.delegate
-            .set_callback_data(sys::NCAppDelegateCallbackData { app_ptr });
-        app
+        *did_init = true;
     }
 
-    pub(crate) fn instance_impl(&self) -> &Arc<Instance> {
+    debug!(target: "narwhal", "Initializing application “{}” version {:?}", name, version);
+
+    let ns_app = sys::NSApplication::shared();
+    let app_delegate = sys::NCAppDelegate::new(app_callback);
+
+    unsafe { ns_app.set_delegate(app_delegate.0) };
+
+    app_delegate.set_dark_appearance();
+    app_delegate.set_default_main_menu(name);
+
+    let instance = Instance::with_loader(
+        FunctionPointers::new({
+            use std::os::raw::c_char;
+            use vk_sys as vk;
+            use vulkano::instance::loader::Loader;
+
+            Box::new(statically_linked_vulkan_loader!())
+        }),
+        Some(&ApplicationInfo {
+            application_name: Some(name.into()),
+            application_version: Some(Version {
+                major: version.0,
+                minor: version.1,
+                patch: version.2,
+            }),
+            engine_name: None,
+            engine_version: None,
+        }),
+        &InstanceExtensions {
+            khr_surface: true,
+            mvk_macos_surface: true,
+            ..InstanceExtensions::none()
+        },
+        None,
+    )
+    .expect("Failed to create Vulkan instance");
+
+    let app = Pin::new(Box::new(CocoaApp {
+        app: ns_app,
+        delegate: app_delegate,
+        instance,
+        callback,
+        event_queue: VecDeque::new(),
+        data: Box::new(PrivateTypeForInitialUserData),
+    }));
+    let app_ptr = &*app as *const CocoaApp as *mut ();
+    app.delegate
+        .set_callback_data(sys::NCAppDelegateCallbackData { app_ptr });
+    unsafe { app.app.finish_launching_and_activate() };
+    app
+}
+
+impl CocoaApp {
+    pub(crate) fn instance(&self) -> &Arc<Instance> {
         &self.instance
     }
 
-    pub(crate) fn run_impl(&mut self) {
-        self.app.run();
-    }
-}
+    pub(crate) fn run(&mut self) -> ! {
+        unsafe { self.app.run() };
+        loop {
+            let mut is_first = true;
 
-impl App {
-    pub(crate) fn create_window_impl<F: 'static + Fn(WindowEvent, &mut Window)>(
+            let _pool = sys::NSAutoreleasePool::new();
+
+            loop {
+                let wait_duration = if is_first {
+                    is_first = false;
+                    // block waiting for the next event
+                    sys::NSDate::distant_future()
+                } else {
+                    // then dequeue the rest
+                    sys::NSDate::distant_past()
+                };
+
+                let event = unsafe {
+                    self.app.next_event(
+                        sys::NSEventMask::NSAnyEventMask,
+                        wait_duration,
+                        sys::NSRunLoopMode::Default,
+                        true,
+                    )
+                };
+
+                if let Some(event) = event {
+                    match event.event_type() {
+                        sys::NSEventType::ApplicationDefined => (),
+                        _ => unsafe { self.app.send_event(event) },
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn dequeue_events(&mut self) {
+        while let Some(event) = self.delegate.dequeue_event() {
+            self.event_queue.push_back(match event.event_type() {
+                sys::NCAppEventType::Ready => AppEvent::Ready,
+                sys::NCAppEventType::Terminating => AppEvent::Terminating,
+            });
+        }
+    }
+
+    fn call_user_callback(&mut self) {
+        // the following is PROBABLY EXTREMELY UNSAFE operating under the assumption that
+        // App(InnerApp, PhantomData) is exactly the same as InnerApp (memory-wise)
+        // hence, &mut App == &mut InnerApp == &mut Pin<Box<CocoaApp>>
+        let mut tmp_pin = Pin::new(unsafe { Box::from_raw(self) });
+
+        {
+            let tmp_app = unsafe { mem::transmute::<&mut InnerApp, &mut App>(&mut tmp_pin) };
+            (self.callback)(tmp_app);
+        }
+
+        mem::forget(tmp_pin); // don’t want to drop the app
+    }
+
+    pub(crate) fn events(&mut self) -> impl Iterator<Item = AppEvent> + '_ {
+        struct Drain<'a>(&'a mut CocoaApp);
+        impl<'a> Iterator for Drain<'a> {
+            type Item = AppEvent;
+            fn next(&mut self) -> Option<AppEvent> {
+                self.0.event_queue.pop_front()
+            }
+        }
+        Drain(self)
+    }
+
+    pub(crate) fn create_window(
         &mut self,
         width: u16,
         height: u16,
-        callback: F,
-    ) -> Box<Window> {
-        let window = sys::NCWindow::new_metal(
+        callback: Box<WindowCallback>,
+    ) -> Pin<Box<CocoaWindow>> {
+        let window = sys::NCWindow::new(
             NSRect::new(
                 NSPoint::new(0., 0.),
                 NSSize::new(width as f64, height as f64),
@@ -155,20 +203,18 @@ impl App {
 
         // TODO: don’t panic
         let surface = unsafe {
-            Surface::from_macos_moltenvk(Arc::clone(&self.instance), layer, NarwhalSurface)
+            Surface::from_macos_moltenvk(Arc::clone(&self.instance), layer, NarwhalSurface(()))
                 .expect("Failed to create window surface")
         };
-        let window = Box::new(Window {
+        let window = Pin::new(Box::new(CocoaWindow {
             inner: window,
             surface,
-            callback_manager: sys::NCCallbackManager::new(),
-            callback: Box::new(callback),
-            event_queue: Vec::new(),
+            callback,
+            event_queue: VecDeque::new(),
             data: Box::new(PrivateTypeForInitialUserData),
-        });
+        }));
 
-        let window_ptr = &*window as *const Window as *mut ();
-        window.callback_manager.set_owner(window_ptr);
+        let window_ptr = &*window as *const CocoaWindow as *mut ();
         window
             .inner
             .set_callback_data(sys::NCWindowCallbackData { window_ptr });
@@ -177,36 +223,27 @@ impl App {
     }
 }
 
-type WindowCallback = Fn(WindowEvent, &mut Window);
-fn null_window_callback(_: WindowEvent, _: &mut Window) {}
-
 /// Narwhal Surface metadata.
 ///
 /// (Unused in the Cocoa backend)
-pub struct NarwhalSurface;
+pub struct NarwhalSurface(());
 
-/// A window.
-///
-/// Created with [App::create_window].
-///
-/// TODO: make this Pin when Pin is stable.
-pub struct Window {
+pub(crate) struct CocoaWindow {
     inner: sys::NCWindow,
     surface: Arc<Surface<NarwhalSurface>>,
-    callback_manager: sys::NCCallbackManager,
+    event_queue: VecDeque<WindowEvent>,
     callback: Box<WindowCallback>,
-    event_queue: Vec<WindowEvent>,
 
     /// User data; won’t be touched by anything in this crate.
     pub data: Box<Any>,
 }
 
-extern "C" fn window_callback(window: sys::NCWindow) {
-    let window = unsafe { &mut *(window.callback_data().window_ptr as *mut Window) };
+pub(crate) type InnerWindow = Pin<Box<CocoaWindow>>;
 
-    let events = window.inner.drain_events();
-    for i in 0..events.len() {
-        let event = events.get(i);
+extern "C" fn window_callback(window: sys::NCWindow) {
+    let window = unsafe { &mut *(window.callback_data().window_ptr as *mut CocoaWindow) };
+
+    while let Some(event) = window.inner.dequeue_event() {
         if let Some(event) = match event.event_type() {
             sys::NCWindowEventType::NSEvent => {
                 let event = event
@@ -225,29 +262,42 @@ extern "C" fn window_callback(window: sys::NCWindow) {
             sys::NCWindowEventType::WillClose => Some(WindowEvent::Closing),
             sys::NCWindowEventType::Ready => Some(WindowEvent::Ready),
         } {
-            window.event_queue.push(event);
+            window.event_queue.push_back(event);
         }
     }
 
-    let callback = mem::replace(&mut window.callback, Box::new(null_window_callback));
-    let event_queue = mem::replace(&mut window.event_queue, Vec::new());
+    window.call_user_callback();
+}
 
-    for event in event_queue {
-        callback(event, window);
+impl CocoaWindow {
+    pub(crate) fn events(&mut self) -> impl Iterator<Item = WindowEvent> + '_ {
+        struct Drain<'a>(&'a mut CocoaWindow);
+        impl<'a> Iterator for Drain<'a> {
+            type Item = WindowEvent;
+            fn next(&mut self) -> Option<WindowEvent> {
+                self.0.event_queue.pop_front()
+            }
+        }
+        Drain(self)
     }
 
-    mem::replace(&mut window.callback, callback);
-}
+    pub(crate) fn request_frame(&mut self) {
+        self.inner.request_frame();
+    }
 
-fn window_scheduled_callback(window: *mut ()) {
-    let window = unsafe { &mut *(window as *mut Window) };
-    let callback = mem::replace(&mut window.callback, Box::new(null_window_callback));
-    callback(WindowEvent::Scheduled, window);
-    mem::replace(&mut window.callback, callback);
-}
+    fn call_user_callback(&mut self) {
+        // see call_user_callback in CocoaApp for more details
+        let mut tmp_pin = Pin::new(unsafe { Box::from_raw(self) });
 
-impl Window {
-    pub(crate) fn icc_profile_impl(&self) -> Option<Vec<u8>> {
+        {
+            let tmp_win = unsafe { mem::transmute::<&mut InnerWindow, &mut Window>(&mut tmp_pin) };
+            (self.callback)(tmp_win);
+        }
+
+        mem::forget(tmp_pin);
+    }
+
+    pub(crate) fn icc_profile(&self) -> Option<Vec<u8>> {
         // Some(unsafe { self.inner.color_space().icc_profile_data() }.to_vec())
         // FIXME: Apple Color LCD has wrong color transform
         // falling back to sRGB for now
@@ -255,7 +305,7 @@ impl Window {
         None
     }
 
-    pub(crate) fn pos_impl(&self) -> Vector2<u16> {
+    pub(crate) fn pos(&self) -> Vector2<u16> {
         let point = self.inner.frame().origin;
         Vector2 {
             x: point.x as u16,
@@ -263,14 +313,14 @@ impl Window {
         }
     }
 
-    pub(crate) fn set_pos_impl(&mut self, pos: Vector2<u16>) {
+    pub(crate) fn set_pos(&mut self, pos: Vector2<u16>) {
         let mut frame = self.inner.frame();
         frame.origin.x = pos.x as f64;
         frame.origin.y = pos.y as f64;
         self.inner.set_frame(frame);
     }
 
-    pub(crate) fn size_impl(&self) -> Vector2<u16> {
+    pub(crate) fn size(&self) -> Vector2<u16> {
         let size = self.inner.content_view_frame().size;
         Vector2 {
             x: size.width as u16,
@@ -278,37 +328,27 @@ impl Window {
         }
     }
 
-    pub(crate) fn set_size_impl(&mut self, size: Vector2<u16>) {
+    pub(crate) fn set_size(&mut self, size: Vector2<u16>) {
         self.inner.set_content_size(NSSize {
             width: size.x as f64,
             height: size.y as f64,
         });
     }
 
-    pub(crate) fn physical_pixel_scale_impl(&self) -> f64 {
+    pub(crate) fn backing_scale_factor(&self) -> f64 {
         self.inner.backing_scale_factor()
     }
 
-    pub(crate) fn schedule_callback_impl(&mut self, delay: Duration) {
-        self.callback_manager
-            .schedule_callback(delay, Box::new(window_scheduled_callback));
-    }
-
-    pub(crate) fn surface_impl(&self) -> &Arc<Surface<NarwhalSurface>> {
+    pub(crate) fn surface(&self) -> &Arc<Surface<NarwhalSurface>> {
         &self.surface
     }
 
-    pub(crate) fn title_impl(&self) -> String {
+    pub(crate) fn title(&self) -> String {
         self.inner.title()
     }
 
-    pub(crate) fn set_title_impl(&self, title: &str) {
+    pub(crate) fn set_title(&self, title: &str) {
         self.inner.set_title(title)
-    }
-
-    pub(crate) fn set_title_filename_impl(&self, filename: &str) -> bool {
-        self.inner.set_title_with_represented_filename(filename);
-        true
     }
 }
 
@@ -403,14 +443,8 @@ fn nsevent_to_window_event(event: sys::NSEvent) -> Option<WindowEvent> {
                     may_check_subtype = true;
                     EventType::PointerMoved
                 }
-                sys::NSEventType::MouseEntered => {
-                    may_check_subtype = true;
-                    may_read_pressure = true;
-                    EventType::PointerEntered
-                }
-                sys::NSEventType::MouseExited => {
-                    EventType::PointerExited
-                }
+                sys::NSEventType::MouseEntered => EventType::PointerEntered,
+                sys::NSEventType::MouseExited => EventType::PointerExited,
                 sys::NSEventType::FlagsChanged => EventType::ModifiersChanged,
                 sys::NSEventType::ScrollWheel => EventType::Scroll,
                 sys::NSEventType::TabletPoint => {

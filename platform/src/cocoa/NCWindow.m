@@ -1,5 +1,5 @@
+#import "NCAppDelegate.h"
 #import "NCWindow.h"
-#import "available.h"
 
 @implementation NCWindowEvent
 @synthesize eventType;
@@ -11,16 +11,26 @@
 }
 @end
 
+CVReturn displayLinkCallback(
+    CVDisplayLinkRef displayLink,
+    const CVTimeStamp *inNow,
+    const CVTimeStamp *inOutputTime,
+    CVOptionFlags flagsIn,
+    CVOptionFlags *flagsOut,
+    void *displayLinkContext
+) {
+    NCWindow *window = (__bridge NCWindow *) displayLinkContext;
+    [window handleFrame];
+    return kCVReturnSuccess;
+}
+
 @implementation NCWindow
 
-@synthesize deviceType;
 @synthesize metalLayer;
-@synthesize openGLContext;
 @synthesize callbackData;
 
 - (instancetype)initWithContentRect:(NSRect)contentRect
-                           callback:(void (*)(NCWindow*))callbackFn
-                             device:(NCWindowDevice)device {
+                           callback:(void (*)(NCWindow*))callbackFn {
     self = [super initWithContentRect:contentRect
                      styleMask:NSWindowStyleMaskTitled
                              | NSWindowStyleMaskClosable
@@ -33,8 +43,8 @@
     events = [[NSMutableArray alloc] initWithCapacity:2];
     didSendReady = NO;
 
-    // set appearance to vibrantDark on Yosemite <= x < Mojave
-    if (IS_YOSEMITE_AVAILABLE && !IS_MOJAVE_AVAILABLE) {
+    // set appearance to vibrantDark on < Mojave
+    if (!IS_MOJAVE_AVAILABLE) {
         [self setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameVibrantDark]];
     }
 
@@ -42,49 +52,21 @@
     [self setAcceptsMouseMovedEvents:YES];
     [self setDelegate:self];
 
-    if (IS_EL_CAPITAN_AVAILABLE && device == NCWindowDeviceMetal) {
-        deviceType = NCWindowDeviceMetal;
-        CAMetalLayer *layer = [[CAMetalLayer alloc] init];
-        layer.pixelFormat = MTLPixelFormatRGBA16Float;
-        // layer.colorspace = self.colorSpace.CGColorSpace;
-        layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-        layer.framebufferOnly = YES;
-        layer.edgeAntialiasingMask = 0;
-        layer.presentsWithTransaction = NO;
-        layer.wantsExtendedDynamicRangeContent = YES;
-        layer.contentsScale = self.backingScaleFactor;
-        metalLayer = layer;
-        [self.contentView setLayer:layer];
-    } else if (device == NCWindowDeviceOpenGL) {
-        deviceType = NCWindowDeviceOpenGL;
-        NSOpenGLPixelFormatAttribute attrs[] = {
-            NSOpenGLPFADoubleBuffer,
-            NSOpenGLPFAClosestPolicy,
-            NSOpenGLPFAColorSize, 32,
-            NSOpenGLPFAAlphaSize, 8,
-            NSOpenGLPFADepthSize, 24,
-            NSOpenGLPFAStencilSize, 8,
-            NSOpenGLPFAAllowOfflineRenderers,
-            NSOpenGLPFAOpenGLProfile, NSOpenGLProfileVersion3_2Core,
-            NSOpenGLPFAMultisample,
-            NSOpenGLPFASampleBuffers, 1,
-            NSOpenGLPFASamples, 4,
-            0
-        };
-        NSOpenGLPixelFormat *pixelFormat = [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs];
-        NSOpenGLView *openGLView = [[NSOpenGLView alloc] initWithFrame:NSMakeRect(0., 0., 0., 0.)
-                                                           pixelFormat:pixelFormat];
-        [openGLView setWantsBestResolutionOpenGLSurface:YES];
-        [self setContentView:openGLView];
-        openGLContext = [openGLView openGLContext];
-        [openGLContext makeCurrentContext];
+    CAMetalLayer *layer = [CAMetalLayer layer];
+    layer.pixelFormat = MTLPixelFormatRGBA16Float;
+    // TEMP until color transform is fixed
+    // layer.colorspace = self.colorSpace.CGColorSpace;
+    layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    layer.framebufferOnly = YES;
+    layer.edgeAntialiasingMask = 0;
+    layer.presentsWithTransaction = NO;
+    layer.wantsExtendedDynamicRangeContent = YES;
+    layer.contentsScale = self.backingScaleFactor;
+    metalLayer = layer;
+    [self.contentView setLayer:layer];
 
-        // don’t really know what this does; copied it from somewhere
-        CGLEnable([openGLContext CGLContextObj], kCGLCECrashOnRemovedFunctions);
-    } else {
-        [self release];
-        return nil;
-    }
+    CVDisplayLinkCreateWithActiveCGDisplays(&displayLink);
+    CVDisplayLinkSetOutputCallback(displayLink, displayLinkCallback, (__bridge void *) self);
 
     [self makeKeyAndOrderFront:nil];
     shouldSendReadyOnUpdate = YES;
@@ -92,9 +74,29 @@
     return self;
 }
 
-- (void)_doCallback {
+- (void)doCallback {
     if (callback != nil) {
         callback(self);
+    }
+}
+
+- (void)requestFrame {
+    syncTimeout = 12;
+
+    if (!displayLinkRunning) {
+        CVDisplayLinkStart(displayLink);
+        displayLinkRunning = YES;
+    }
+}
+
+- (void)handleFrame {
+    [self doCallback];
+
+    if (syncTimeout > 0) {
+        syncTimeout -= 1;
+    } else {
+        CVDisplayLinkStop(displayLink);
+        displayLinkRunning = NO;
     }
 }
 
@@ -104,7 +106,7 @@
     windowEvent.eventType = NCWindowEventTypeNSEvent;
     windowEvent.event = event;
     [events addObject:windowEvent];
-    [self _doCallback];
+    [self requestFrame];
 }
 
 - (void)pushWindowEvent:(NCWindowEventType)eventType {
@@ -112,7 +114,7 @@
     NCWindowEvent *windowEvent = [[NCWindowEvent alloc] init];
     windowEvent.eventType = eventType;
     [events addObject:windowEvent];
-    [self _doCallback];
+    [self doCallback];
 }
 
 - (void)sendEvent:(NSEvent*)event {
@@ -120,16 +122,17 @@
     [self pushNSEvent:event];
 }
 
-- (NSArray *)drainEvents {
-    NSArray* result = events;
-    events = [[NSMutableArray alloc] initWithCapacity:2];
-    return result;
+- (NCWindowEvent *)dequeueEvent {
+    if ([events count] == 0) {
+        return nil;
+    }
+    NCWindowEvent *event = [events firstObject];
+    [events removeObjectAtIndex:0];
+    return event;
 }
 
 - (void)setDevice:(id<MTLDevice>)device {
-    if (IS_EL_CAPITAN_AVAILABLE) {
-        ((CAMetalLayer *) self.metalLayer).device = device;
-    }
+    metalLayer.device = device;
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
@@ -148,12 +151,17 @@
     }
 }
 
-- (void)windowDidChangeBackingProperties:(NSNotification *)notification {
-    if (IS_EL_CAPITAN_AVAILABLE) {
-        ((CAMetalLayer *) self.metalLayer).contentsScale = self.backingScaleFactor;
-        ((CAMetalLayer *) self.metalLayer).colorspace = self.colorSpace.CGColorSpace;
-        [self pushWindowEvent:NCWindowEventTypeBackingUpdate];
+- (void)dealloc {
+    if (displayLinkRunning) {
+        CVDisplayLinkStop(displayLink);
+        displayLinkRunning = NO;
     }
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification {
+    metalLayer.contentsScale = self.backingScaleFactor;
+    metalLayer.colorspace = self.colorSpace.CGColorSpace;
+    [self pushWindowEvent:NCWindowEventTypeBackingUpdate];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
