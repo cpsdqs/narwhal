@@ -3,14 +3,16 @@
 #![allow(dead_code)]
 
 use crate::event::KeyCode;
+use cocoa::appkit::CGFloat;
 use cocoa::appkit::NSApplicationActivateIgnoringOtherApps;
+use cocoa::appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular;
 pub use cocoa::appkit::NSEventMask;
+use cocoa::base::{id, nil};
 use cocoa::foundation::NSDefaultRunLoopMode;
-use cocoa_ffi::appkit::CGFloat;
-use cocoa_ffi::appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular;
-use cocoa_ffi::base::{id, nil};
-pub use cocoa_ffi::foundation::{NSInteger, NSPoint, NSRect, NSSize, NSUInteger};
+pub use cocoa::foundation::{NSInteger, NSPoint, NSRect, NSSize, NSUInteger};
+use lazy_static::lazy_static;
 pub use objc::runtime::*;
+use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_float;
 use std::{slice, str};
@@ -184,7 +186,7 @@ pub type CAMetalLayer = id;
 
 impl NSApplication {
     pub fn shared() -> NSApplication {
-        NSApplication(unsafe { msg_send![Class::get("NSApplication").unwrap(), sharedApplication] })
+        NSApplication(unsafe { msg_send![class!(NSApplication), sharedApplication] })
     }
 
     pub unsafe fn set_delegate(&self, delegate: id) {
@@ -211,10 +213,7 @@ impl NSApplication {
         if needs_activation {
             // [NSApplication activateIgnoringOtherApps:YES] would do the same thing in theory
             // but using this method makes the menu bar work without refocusing
-            let current: id = msg_send![
-                Class::get("NSRunningApplication").unwrap(),
-                currentApplication
-            ];
+            let current: id = msg_send![class!(NSRunningApplication), currentApplication];
             msg_send![
                 current,
                 activateWithOptions: NSApplicationActivateIgnoringOtherApps

@@ -1,12 +1,15 @@
 use crate::event::*;
 use crate::{App, AppCallback, Window, WindowCallback};
 use cgmath::{Point2, Vector2, Vector3};
-use cocoa_ffi::foundation::{NSPoint, NSRect, NSSize};
+use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use lazy_static::lazy_static;
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::VecDeque;
 use std::mem;
+use std::ops::DerefMut;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use vulkano::instance::loader::FunctionPointers;
 use vulkano::instance::{ApplicationInfo, Instance, InstanceExtensions, Version};
 use vulkano::statically_linked_vulkan_loader;
@@ -48,7 +51,7 @@ pub(crate) fn init_app(
     callback: Box<AppCallback>,
 ) -> Pin<Box<CocoaApp>> {
     {
-        let mut did_init = DID_INIT_APP.lock().unwrap();
+        let mut did_init = DID_INIT_APP.lock();
         if *did_init {
             panic!("Cannot initialize narwhal::platform::App twice");
         }
@@ -211,7 +214,7 @@ impl CocoaApp {
             surface,
             callback,
             event_queue: VecDeque::new(),
-            data: Box::new(PrivateTypeForInitialUserData),
+            data: Mutex::new(Box::new(PrivateTypeForInitialUserData)),
         }));
 
         let window_ptr = &*window as *const CocoaWindow as *mut ();
@@ -235,7 +238,7 @@ pub(crate) struct CocoaWindow {
     callback: Box<WindowCallback>,
 
     /// User data; won’t be touched by anything in this crate.
-    pub data: Box<Any>,
+    pub data: Mutex<Box<Any + Send + Sync>>,
 }
 
 pub(crate) type InnerWindow = Pin<Box<CocoaWindow>>;
@@ -287,6 +290,10 @@ impl CocoaWindow {
             }
         }
         Drain(self)
+    }
+
+    pub(crate) fn data(&mut self) -> impl DerefMut<Target = Box<dyn Any + Send + Sync>> {
+        self.data.lock()
     }
 
     pub(crate) fn request_frame(&mut self) {

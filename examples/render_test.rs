@@ -79,7 +79,7 @@ fn handle_app_event(app: &mut App, app_event: AppEvent) {
                     .set_profile(profile)
                     .expect("Failed to set profile");
             }
-            *win.data_mut() = Box::new(WinData {
+            *win.data() = Box::new(WinData {
                 renderer,
                 presenter: Mutex::new(presenter),
                 cam_z: 200.,
@@ -95,7 +95,8 @@ fn handle_window_events(win: &mut Window) {
     for event in win.events().collect::<Vec<_>>() {
         let win_size = win.size_f32();
         let win_resolution = win.backing_scale_factor() as f32;
-        let data: &mut WinData = win.data_mut().downcast_mut().expect("Invalid window data");
+        let mut data_ref = win.data();
+        let data: &mut WinData = data_ref.downcast_mut().expect("Invalid window data");
 
         match event {
             WindowEvent::Ready => {
@@ -263,7 +264,8 @@ fn handle_window_events(win: &mut Window) {
         }
     }
 
-    let data: &mut WinData = win.data_mut().downcast_mut().expect("Invalid window data");
+    let mut data_ref = win.data();
+    let data: &mut WinData = data_ref.downcast_mut().expect("Invalid window data");
     let cmd_buffer = data.renderer.new_cmd_buffer().unwrap();
     let (cmd_buffer, out_tex) = data.renderer.render(cmd_buffer).unwrap();
 

@@ -9,32 +9,14 @@
 //! - The origin of the coordinate system for windows is at the bottom left of the primary screen,
 //!   with positive X going right and positive Y going upwards
 
-extern crate cgmath;
 #[macro_use]
 extern crate log;
-extern crate vulkano;
-#[macro_use]
-extern crate lazy_static;
-
-#[macro_use]
-#[cfg(target_os = "macos")]
-extern crate objc;
-#[cfg(target_os = "macos")]
-extern crate cocoa as cocoa_ffi;
-#[cfg(target_os = "macos")]
-extern crate vk_sys;
-
-#[cfg(target_os = "linux")]
-extern crate smithay_client_toolkit;
-#[cfg(target_os = "linux")]
-extern crate wayland_client;
-#[cfg(target_os = "linux")]
-extern crate wayland_protocols;
 
 use crate::event::{AppEvent, WindowEvent};
 use cgmath::Vector2;
 use std::any::Any;
 use std::marker::PhantomData;
+use std::ops::DerefMut;
 use std::sync::Arc;
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
@@ -69,7 +51,7 @@ pub struct App(InnerApp, PhantomNotSend);
 ///
 /// The callback function will be called synchronously with every frame, or immediately when special
 /// events occur (such as resizing). Note that this may entail the callback being called from
-/// **different threads**.
+/// **different threads** (despite the fact that Window is !Send + !Sync).
 /// When using a narwhal `Presenter`, it should be ensured that the `wait` calls are not
 /// overlapping.
 #[repr(C)]
@@ -105,7 +87,10 @@ impl App {
         self.0.run()
     }
 
-    /// Creates a window.
+    /// Creates a window with a callback.
+    ///
+    /// The width and the height are the *suggested* content size. It may happen that the window
+    /// ends up having different dimensions.
     pub fn create_window<F>(&mut self, width: u16, height: u16, callback: F) -> Window
     where
         F: FnMut(&mut Window) + Send + Sync + 'static,
@@ -146,14 +131,9 @@ impl Window {
         self.0.surface()
     }
 
-    /// Returns a reference to the user data.
-    pub fn data(&self) -> &Box<dyn Any> {
-        &self.0.data
-    }
-
     /// Returns a mutable reference to the user data.
-    pub fn data_mut(&mut self) -> &mut Box<dyn Any> {
-        &mut self.0.data
+    pub fn data(&mut self) -> impl DerefMut<Target = Box<dyn Any + Send + Sync>> {
+        self.0.data()
     }
 
     /// Returns the window’s ICC profile data.

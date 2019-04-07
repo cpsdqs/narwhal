@@ -1,7 +1,3 @@
-use std::env;
-use std::path::Path;
-use std::process::{Command, Stdio};
-
 fn main() {
     #[cfg(target_os = "macos")]
     build_cocoa();
@@ -9,6 +5,10 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn build_cocoa() {
+    use std::env;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
     let mut objc_args = vec![
         // use objective-c
         "-xobjective-c",
