@@ -54,9 +54,7 @@ CVReturn displayLinkCallback(
 
     CAMetalLayer *layer = [CAMetalLayer layer];
     layer.pixelFormat = MTLPixelFormatRGBA16Float;
-    // TEMP until color transform is fixed
-    // layer.colorspace = self.colorSpace.CGColorSpace;
-    layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceACESCGLinear);
     layer.framebufferOnly = YES;
     layer.edgeAntialiasingMask = 0;
     layer.presentsWithTransaction = NO;
@@ -133,6 +131,10 @@ CVReturn displayLinkCallback(
 
 - (void)setDevice:(id<MTLDevice>)device {
     metalLayer.device = device;
+}
+
+- (NSColorSpace *)layerColorSpace {
+    return [[NSColorSpace alloc] initWithCGColorSpace:metalLayer.colorspace];
 }
 
 - (void)windowDidResize:(NSNotification *)notification {

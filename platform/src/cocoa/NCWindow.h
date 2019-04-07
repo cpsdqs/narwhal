@@ -40,6 +40,7 @@ typedef struct {
 - (void)setDevice:(id<MTLDevice>)device;
 - (void)requestFrame;
 - (void)handleFrame;
+- (NSColorSpace *)layerColorSpace;
 
 @end
 

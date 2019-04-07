@@ -364,8 +364,8 @@ impl NCWindow {
         unsafe { msg_send![self.0, setContentSize: size] }
     }
 
-    pub fn color_space(&self) -> NSColorSpace {
-        NSColorSpace(unsafe { msg_send![self.0, colorSpace] })
+    pub fn layer_color_space(&self) -> NSColorSpace {
+        NSColorSpace(unsafe { msg_send![self.0, layerColorSpace] })
     }
 
     pub fn min_size(&self) -> NSSize {

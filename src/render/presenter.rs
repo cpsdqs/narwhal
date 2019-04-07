@@ -43,6 +43,7 @@ pub struct Presenter {
     swapchain: Arc<Swapchain<NarwhalSurface>>,
     chain_images: Vec<Arc<SwapchainImage<NarwhalSurface>>>,
     color_transform: ColorTransform,
+    color_transform_enabled: bool,
     tex_renderer: SwapchainRenderer,
 }
 
@@ -105,6 +106,7 @@ impl Presenter {
             swapchain,
             chain_images,
             color_transform,
+            color_transform_enabled: true,
             tex_renderer,
         };
         presenter.set_profile(SRGB.clone())?;
@@ -117,6 +119,26 @@ impl Presenter {
             Ok(t) => t,
             Err(err) => return Err(ColorTransformEncodeError::TransformFailed(err).into()),
         };
+
+        // check if the profile is ACEScg
+        // FIXME: this is a terrible heuristic
+        // sample a few colors and see if the transform is rougly an identity transform
+        self.color_transform_enabled = false;
+        let samples = [0., 0.1, 0.2, 1., 0.5, 0.9, 0.3, 1., 0.8, 0.2, 0.4, 1.];
+        let mut output: Vec<f32> = Vec::new();
+        output.resize(samples.len(), 0.);
+        transform.convert(&samples, &mut output);
+        for (i, (a, b)) in samples.iter().zip(output.iter()).enumerate() {
+            if i % 4 == 3 {
+                // skip alpha
+                continue;
+            }
+            if (a - b).abs() > 0.0001 {
+                self.color_transform_enabled = true;
+                break;
+            }
+        }
+
         self.color_transform.set_transform(transform)
     }
 
@@ -196,8 +218,9 @@ impl Presenter {
             Ok(v) => v,
             Err(AcquireError::OutOfDate) => {
                 self.reacquire_swapchain()?;
+                // the following may error when not rendering from the main thread
                 swapchain::acquire_next_image(Arc::clone(&self.swapchain), None)
-                    .expect("Newly acquire swapchain errored")
+                    .map_err(|e| PresentError::Internal(Arc::new(e.into())))?
             }
             Err(e) => return Err(Error::from(e).into()),
         };
@@ -205,30 +228,36 @@ impl Presenter {
         let surf_image = &self.chain_images[index];
         let size = surf_image.dimensions();
 
-        // TODO: don't recreate this every frame
-        let intermediate = StorageImage::with_usage(
-            Arc::clone(&self.device),
-            Dimensions::Dim2d {
-                width: size[0],
-                height: size[1],
-            },
-            COLOR_FORMAT,
-            ImageUsage {
-                sampled: true,
-                storage: true,
-                ..ImageUsage::none()
-            },
-            Some(self.queue.family()),
-        )
-        .map_err(|e| Error::from(e))?;
+        if self.color_transform_enabled {
+            // TODO: don't recreate this every frame
+            let intermediate = StorageImage::with_usage(
+                Arc::clone(&self.device),
+                Dimensions::Dim2d {
+                    width: size[0],
+                    height: size[1],
+                },
+                COLOR_FORMAT,
+                ImageUsage {
+                    sampled: true,
+                    storage: true,
+                    ..ImageUsage::none()
+                },
+                Some(self.queue.family()),
+            )
+            .map_err(|e| Error::from(e))?;
 
-        cmd_buffer = self
-            .color_transform
-            .dispatch(cmd_buffer, tex, &intermediate)?;
+            cmd_buffer = self
+                .color_transform
+                .dispatch(cmd_buffer, tex, &intermediate)?;
 
-        cmd_buffer =
-            self.tex_renderer
-                .render(cmd_buffer, &Texture::Storage(intermediate), surf_image)?;
+            cmd_buffer = self.tex_renderer.render(
+                cmd_buffer,
+                &Texture::Storage(intermediate),
+                surf_image,
+            )?;
+        } else {
+            cmd_buffer = self.tex_renderer.render(cmd_buffer, tex, surf_image)?;
+        }
 
         let cmd_buffer = cmd_buffer.build().map_err(|e| Error::from(e))?;
 

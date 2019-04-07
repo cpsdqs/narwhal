@@ -298,11 +298,7 @@ impl CocoaWindow {
     }
 
     pub(crate) fn icc_profile(&self) -> Option<Vec<u8>> {
-        // Some(unsafe { self.inner.color_space().icc_profile_data() }.to_vec())
-        // FIXME: Apple Color LCD has wrong color transform
-        // falling back to sRGB for now
-        // (remember to reset layer.colorspace in NCWindow.m)
-        None
+        Some(unsafe { self.inner.layer_color_space().icc_profile_data() }.to_vec())
     }
 
     pub(crate) fn pos(&self) -> Vector2<u16> {
