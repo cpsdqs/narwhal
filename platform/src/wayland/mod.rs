@@ -1,4 +1,7 @@
-use self::input_handler;
+use std::ops::{Deref, DerefMut};
+use std::collections::VecDeque;
+use std::pin::Pin;
+use crate::{App, AppCallback, Window, WindowCallback};
 use crate::event::{AppEvent, WindowEvent};
 use cgmath::Vector2;
 use smithay_client_toolkit::{Environment, Shell};
@@ -21,6 +24,7 @@ use wayland_protocols::xdg_shell::client::xdg_toplevel::{
     Event as XdgToplevelEvent, RequestsTrait as XdgToplevelReq, XdgToplevel,
 };
 use wayland_protocols::xdg_shell::client::xdg_wm_base::RequestsTrait as XdgWmBaseReq;
+use lazy_static::lazy_static;
 
 mod input_handler;
 
@@ -32,9 +36,6 @@ lazy_static! {
 /// empty. Because this is a private type, no downcast call with this inside can be successful
 /// outside of this crate.
 struct PrivateTypeForInitialUserData;
-
-type AppCallback = Fn(AppEvent, &mut App);
-fn null_app_callback(_: AppEvent, _: &mut App) {}
 
 type SurfaceID = u32;
 
@@ -51,15 +52,15 @@ enum Update {
 }
 
 /// The application.
-pub struct App {
+pub(crate) struct WaylandApp {
     display: Display,
     environment: Environment,
     wl_queue: EventQueue,
     app_name: String,
     callback: Box<AppCallback>,
     instance: Arc<Instance>,
-    event_queue: Vec<AppEvent>,
-    windows: HashMap<SurfaceID, (Weak<Mutex<WindowInner>>, *mut Window)>,
+    event_queue: VecDeque<AppEvent>,
+    windows: HashMap<SurfaceID, (Weak<Mutex<WindowInner>>, *mut WaylandWindow)>,
     update_recv: mpsc::Receiver<WindowUpdate>,
     update_send: mpsc::Sender<WindowUpdate>,
     callback_recv: mpsc::Receiver<(SurfaceID, Instant)>,
@@ -70,120 +71,125 @@ pub struct App {
     pub data: Box<Any>,
 }
 
-impl App {
-    pub(crate) fn init_impl<F: 'static + Fn(AppEvent, &mut App)>(
-        name: &str,
-        version: (u16, u16, u16),
-        callback: F,
-    ) -> Box<App> {
-        {
-            let mut did_init = DID_INIT_APP.lock().unwrap();
-            if *did_init {
-                panic!("Cannot initialize narwhal::platform::App twice");
-            }
-            *did_init = true;
+pub(crate) type InnerApp = WaylandApp;
+
+pub(crate) fn init_app(name: &str, version: (u16, u16, u16), callback: Box<AppCallback>) -> WaylandApp {
+    {
+        let mut did_init = DID_INIT_APP.lock().unwrap();
+        if *did_init {
+            panic!("Cannot initialize narwhal::platform::App twice");
         }
-
-        debug!(target: "narwhal", "Initializing application “{}” version {:?}", name, version);
-
-        let (display, mut event_queue) =
-            Display::connect_to_env().expect("Failed to connect to Wayland server");
-
-        let (update_send, update_recv) = mpsc::channel();
-
-        let mut input_handler = input_handler::InputHandler::new(update_send.clone());
-
-        let environment = Environment::from_display_with_cb(
-            &display,
-            &mut event_queue,
-            move |event, registry| match event {
-                GlobalEvent::New {
-                    id,
-                    interface,
-                    version,
-                } => {
-                    println!("new global: {} v{}", interface, version);
-                    match &*interface {
-                        "wl_seat" => input_handler.add_seat(id, version, &registry),
-                        "zwp_tablet_manager_v2" => {
-                            input_handler.add_tablet_manager(id, version, &registry)
-                        }
-                        _ => (),
-                    }
-                }
-                GlobalEvent::Removed { id, interface } => {
-                    match &*interface {
-                        "wl_seat" => input_handler.remove_seat(id),
-                        "zwp_tablet_manager_v2" => input_handler.remove_tablet_manager(id),
-                        _ => (),
-                    }
-                    println!("global removed: {}", interface);
-                }
-            },
-        )
-        .unwrap();
-
-        let instance = Instance::new(
-            Some(&ApplicationInfo {
-                application_name: Some(name.into()),
-                application_version: Some(Version {
-                    major: version.0,
-                    minor: version.1,
-                    patch: version.2,
-                }),
-                engine_name: None,
-                engine_version: None,
-            }),
-            &InstanceExtensions {
-                khr_surface: true,
-                khr_wayland_surface: true,
-                ..InstanceExtensions::none()
-            },
-            None,
-        )
-        .expect("Failed to create Vulkan instance");
-
-        let (callback_send, callback_recv) = mpsc::channel();
-
-        Box::new(App {
-            display,
-            environment,
-            wl_queue: event_queue,
-            app_name: name.into(),
-            callback: Box::new(callback),
-            instance,
-            event_queue: Vec::new(),
-            windows: HashMap::new(),
-            update_recv,
-            update_send,
-            callback_recv,
-            callback_send,
-            callbacks: Vec::new(),
-            data: Box::new(PrivateTypeForInitialUserData),
-        })
+        *did_init = true;
     }
 
-    pub(crate) fn instance_impl(&self) -> &Arc<Instance> {
+    debug!(target: "narwhal", "Initializing application “{}” version {:?}", name, version);
+
+    let (display, mut event_queue) =
+        Display::connect_to_env().expect("Failed to connect to Wayland server");
+
+    let (update_send, update_recv) = mpsc::channel();
+
+    let mut input_handler = input_handler::InputHandler::new(update_send.clone());
+
+    let environment = Environment::from_display_with_cb(
+        &display,
+        &mut event_queue,
+        move |event, registry| match event {
+            GlobalEvent::New {
+                id,
+                interface,
+                version,
+            } => {
+                println!("new global: {} v{}", interface, version);
+                match &*interface {
+                    "wl_seat" => input_handler.add_seat(id, version, &registry),
+                    "zwp_tablet_manager_v2" => {
+                        input_handler.add_tablet_manager(id, version, &registry)
+                    }
+                    _ => (),
+                }
+            }
+            GlobalEvent::Removed { id, interface } => {
+                match &*interface {
+                    "wl_seat" => input_handler.remove_seat(id),
+                    "zwp_tablet_manager_v2" => input_handler.remove_tablet_manager(id),
+                    _ => (),
+                }
+                println!("global removed: {}", interface);
+            }
+        },
+    )
+    .unwrap();
+
+    let instance = Instance::new(
+        Some(&ApplicationInfo {
+            application_name: Some(name.into()),
+            application_version: Some(Version {
+                major: version.0,
+                minor: version.1,
+                patch: version.2,
+            }),
+            engine_name: None,
+            engine_version: None,
+        }),
+        &InstanceExtensions {
+            khr_surface: true,
+            khr_wayland_surface: true,
+            ..InstanceExtensions::none()
+        },
+        None,
+    )
+    .expect("Failed to create Vulkan instance");
+
+    let (callback_send, callback_recv) = mpsc::channel();
+
+    WaylandApp {
+        display,
+        environment,
+        wl_queue: event_queue,
+        app_name: name.into(),
+        callback,
+        instance,
+        event_queue: VecDeque::new(),
+        windows: HashMap::new(),
+        update_recv,
+        update_send,
+        callback_recv,
+        callback_send,
+        callbacks: Vec::new(),
+        data: Box::new(PrivateTypeForInitialUserData),
+    }
+}
+
+impl WaylandApp {
+    pub(crate) fn events(&mut self) -> impl Iterator<Item = AppEvent> + '_ {
+        struct Drain<'a>(&'a mut WaylandApp);
+        impl<'a> Iterator for Drain<'a> {
+            type Item = AppEvent;
+            fn next(&mut self) -> Option<AppEvent> {
+                self.0.event_queue.pop_front()
+            }
+        }
+        Drain(self)
+    }
+
+    pub(crate) fn instance(&self) -> &Arc<Instance> {
         &self.instance
     }
 
     fn dispatch_callback(&mut self) {
-        let callback = mem::replace(&mut self.callback, Box::new(null_app_callback));
-        let event_queue = mem::replace(&mut self.event_queue, unsafe { mem::uninitialized() });
-
-        for event in event_queue {
-            callback(event, self);
-        }
-
+        fn null(_: &mut App) {}
+        let mut callback = mem::replace(&mut self.callback, Box::new(null));
+        // App is a newtype around InnerApp aka WaylandApp, therefore this should be safe
+        let self_ptr = unsafe { &mut *(self as *mut InnerApp as *mut App) };
+        callback(self_ptr);
         mem::replace(&mut self.callback, callback);
-        // must not drop uninitialized
-        mem::forget(mem::replace(&mut self.event_queue, Vec::new()));
     }
 
-    pub(crate) fn run_impl(&mut self) {
+    pub(crate) fn run(&mut self) -> ! {
         self.display.flush().expect("Failed to flush events");
 
-        self.event_queue.push(AppEvent::Ready);
+        self.event_queue.push_back(AppEvent::Ready);
         self.dispatch_callback();
 
         loop {
@@ -233,12 +239,12 @@ impl App {
 
             for ((window_id, time), index) in self.callbacks.iter().zip(0..) {
                 if time <= &now {
-                    self.update_send
+                    /* self.update_send
                         .send(WindowUpdate {
                             id: *window_id,
                             update: Update::Event(WindowEvent::Scheduled),
                         })
-                        .unwrap();
+                        .unwrap(); */
                     callbacks_to_remove.push(index);
                 } else {
                     break;
@@ -274,7 +280,7 @@ impl App {
                                     }
                                     _ => (),
                                 }
-                                window_inner.event_queue.push(event);
+                                window_inner.event_queue.push_back(event);
                             }
                             Update::Resize(w, h) => {
                                 window_inner.xdg_surface.set_window_geometry(0, 0, w, h);
@@ -292,12 +298,7 @@ impl App {
         }
     }
 
-    pub(crate) fn create_window_impl<F: 'static + Fn(WindowEvent, &mut Window)>(
-        &mut self,
-        width: u16,
-        height: u16,
-        callback: F,
-    ) -> Box<Window> {
+    pub(crate) fn create_window(&mut self, width: u16, height: u16, callback: Box<WindowCallback>) -> Pin<Box<WaylandWindow>> {
         let surface = self
             .environment
             .compositor
@@ -392,23 +393,24 @@ impl App {
             vk_surface: vk_surface.clone(),
             xdg_surface: xdg_surf,
             wl_surface: surface,
-            event_queue: Vec::new(),
+            event_queue: VecDeque::new(),
             size: (width, height),
         }));
 
         let window_inner_ref = Arc::downgrade(&window_inner);
 
-        let window = Box::new(Window {
+        let window = Pin::new(Box::new(WaylandWindow {
             id: window_id,
             title: "".into(),
             inner: window_inner,
             surface: vk_surface,
-            callback: Box::new(callback),
+            event_queue: VecDeque::new(),
+            callback,
             callback_send: self.callback_send.clone(),
             data: Box::new(PrivateTypeForInitialUserData),
-        });
+        }));
 
-        let window_ptr = &*window as *const Window as *mut Window;
+        let window_ptr = &*window as *const WaylandWindow as *mut WaylandWindow;
         self.windows
             .insert(window_id, (window_inner_ref, window_ptr));
         self.update_send
@@ -422,35 +424,28 @@ impl App {
     }
 }
 
-type WindowCallback = Fn(WindowEvent, &mut Window);
-fn null_window_callback(_: WindowEvent, _: &mut Window) {}
-
 struct WindowInner {
     toplevel: Proxy<XdgToplevel>,
     vk_surface: Arc<Surface<NarwhalSurface>>,
     xdg_surface: Proxy<XdgSurface>,
     wl_surface: Proxy<WlSurface>,
-    event_queue: Vec<WindowEvent>,
+    event_queue: VecDeque<WindowEvent>,
     size: (u16, u16),
 }
 
 impl WindowInner {
-    fn dispatch_callback(inner: &Mutex<WindowInner>, owner_ref: *mut Window) {
-        let (win, event_queue) = {
+    fn dispatch_callback(inner: &Mutex<WindowInner>, owner_ref: *mut WaylandWindow) {
+        let win = {
             let mut inner = inner.lock().unwrap();
             let win = unsafe { &mut *owner_ref };
-            let event_queue = mem::replace(&mut inner.event_queue, Vec::new());
-            (win, event_queue)
+            win.event_queue.append(&mut inner.event_queue);
+            win
         };
-        let callback = mem::replace(&mut win.callback, Box::new(null_window_callback));
 
-        // inner must not be borrowed here so that callback can use the window API
-
-        for event in event_queue {
-            callback(event, win);
-        }
-
-        mem::replace(&mut win.callback, callback);
+        let mut tmp_pin = unsafe { Pin::new(Box::from_raw(win)) };
+        let self_ptr = unsafe { mem::transmute::<&mut InnerWindow, &mut Window>(&mut tmp_pin) };
+        (win.callback)(self_ptr);
+        mem::forget(tmp_pin);
     }
 }
 
@@ -460,43 +455,72 @@ pub struct NarwhalSurface {
     pub new_size: Mutex<Option<(Vector2<u16>, f32)>>,
 }
 
-/// A window.
-///
-/// Created with [App::create_window].
-///
-/// TODO: make this Pin when Pin is stable
-pub struct Window {
+pub(crate) struct WaylandWindow {
     id: SurfaceID,
     surface: Arc<Surface<NarwhalSurface>>,
     title: String,
     callback: Box<WindowCallback>,
     callback_send: mpsc::Sender<(SurfaceID, Instant)>,
     inner: Arc<Mutex<WindowInner>>,
+    event_queue: VecDeque<WindowEvent>,
 
     /// User data; won’t be touched by anything in this crate.
-    pub data: Box<Any>,
+    pub data: Box<Any + Send + Sync>,
 }
 
-impl Window {
-    pub(crate) fn icc_profile_impl(&self) -> Option<Vec<u8>> {
+pub(crate) type InnerWindow = Pin<Box<WaylandWindow>>;
+
+impl WaylandWindow {
+    pub(crate) fn events(&mut self) -> impl Iterator<Item = WindowEvent> + '_ {
+        struct Drain<'a>(&'a mut WaylandWindow);
+        impl<'a> Iterator for Drain<'a> {
+            type Item = WindowEvent;
+            fn next(&mut self) -> Option<WindowEvent> {
+                self.0.event_queue.pop_front()
+            }
+        }
+        Drain(self)
+    }
+
+    pub fn data(&mut self) -> impl DerefMut<Target = Box<Any + Send + Sync>> {
+        struct DerefContainer<'a>(&'a mut Box<Any + Send + Sync>);
+        impl<'a> Deref for DerefContainer<'a> {
+            type Target = Box<Any + Send + Sync>;
+            fn deref(&self) -> &Self::Target {
+                self.0
+            }
+        }
+        impl<'a> DerefMut for DerefContainer<'a> {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                self.0
+            }
+        }
+        DerefContainer(&mut self.data)
+    }
+
+    pub(crate) fn request_frame(&self) {
+        unimplemented!("request frame")
+    }
+
+    pub(crate) fn icc_profile(&self) -> Option<Vec<u8>> {
         println!("TODO: ICC profile stuff");
         None
     }
 
-    pub(crate) fn pos_impl(&self) -> Vector2<u16> {
+    pub(crate) fn pos(&self) -> Vector2<u16> {
         // ??
         (0, 0).into()
     }
 
-    pub(crate) fn set_pos_impl(&mut self, _: Vector2<u16>) {
+    pub(crate) fn set_pos(&mut self, _: Vector2<u16>) {
         // ??
     }
 
-    pub(crate) fn size_impl(&self) -> Vector2<u16> {
+    pub(crate) fn size(&self) -> Vector2<u16> {
         self.inner.lock().unwrap().size.into()
     }
 
-    pub(crate) fn set_size_impl(&mut self, size: Vector2<u16>) {
+    pub(crate) fn set_size(&mut self, size: Vector2<u16>) {
         let mut inner = self.inner.lock().unwrap();
         inner
             .xdg_surface
@@ -506,31 +530,27 @@ impl Window {
         *self.surface.window().new_size.lock().unwrap() = Some((size, 2.));
     }
 
-    pub(crate) fn physical_pixel_scale_impl(&self) -> f64 {
-        println!("TODO: get DPI");
+    pub(crate) fn backing_scale_factor(&self) -> f64 {
+        // TODO: get actual DPI
         2.
     }
 
-    pub(crate) fn schedule_callback_impl(&mut self, delay: Duration) {
+    pub(crate) fn schedule_callback(&mut self, delay: Duration) {
         self.callback_send
             .send((self.id, Instant::now() + delay))
             .unwrap();
     }
 
-    pub(crate) fn surface_impl(&self) -> &Arc<Surface<NarwhalSurface>> {
+    pub(crate) fn surface(&self) -> &Arc<Surface<NarwhalSurface>> {
         &self.surface
     }
 
-    pub(crate) fn title_impl(&self) -> String {
+    pub(crate) fn title(&self) -> String {
         self.title.clone()
     }
 
-    pub(crate) fn set_title_impl(&mut self, title: &str) {
+    pub(crate) fn set_title(&mut self, title: &str) {
         self.inner.lock().unwrap().toplevel.set_title(title.into());
         self.title = title.into();
-    }
-
-    pub(crate) fn set_title_filename_impl(&mut self, filename: &str) -> bool {
-        false
     }
 }
