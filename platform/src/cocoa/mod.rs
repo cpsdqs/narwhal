@@ -240,33 +240,41 @@ pub(crate) struct CocoaWindow {
 
 pub(crate) type InnerWindow = Pin<Box<CocoaWindow>>;
 
-extern "C" fn window_callback(window: sys::NCWindow) {
+extern "C" fn window_callback(
+    window: sys::NCWindow,
+    is_main_thread: sys::BOOL,
+    should_render: sys::BOOL,
+) {
     let window = unsafe { &mut *(window.callback_data().window_ptr as *mut CocoaWindow) };
 
-    while let Some(event) = window.inner.dequeue_event() {
-        if let Some(event) = match event.event_type() {
-            sys::NCWindowEventType::NSEvent => {
-                let event = event
-                    .event()
-                    .expect("NCWindowEventType::NSEvent has no NSEvent data");
-                nsevent_to_window_event(event)
+    if is_main_thread == sys::YES {
+        while let Some(event) = window.inner.dequeue_event() {
+            if let Some(event) = match event.event_type() {
+                sys::NCWindowEventType::NSEvent => {
+                    let event = event
+                        .event()
+                        .expect("NCWindowEventType::NSEvent has no NSEvent data");
+                    nsevent_to_window_event(event)
+                }
+                sys::NCWindowEventType::Resized => {
+                    let rect = window.inner.content_view_frame();
+                    Some(WindowEvent::Resized(
+                        rect.size.width as usize,
+                        rect.size.height as usize,
+                    ))
+                }
+                sys::NCWindowEventType::BackingUpdate => Some(WindowEvent::OutputChanged),
+                sys::NCWindowEventType::WillClose => Some(WindowEvent::Closing),
+                sys::NCWindowEventType::Ready => Some(WindowEvent::Ready),
+            } {
+                window.event_queue.push_back(event);
             }
-            sys::NCWindowEventType::Resized => {
-                let rect = window.inner.content_view_frame();
-                Some(WindowEvent::Resized(
-                    rect.size.width as usize,
-                    rect.size.height as usize,
-                ))
-            }
-            sys::NCWindowEventType::BackingUpdate => Some(WindowEvent::OutputChanged),
-            sys::NCWindowEventType::WillClose => Some(WindowEvent::Closing),
-            sys::NCWindowEventType::Ready => Some(WindowEvent::Ready),
-        } {
-            window.event_queue.push_back(event);
         }
     }
 
-    window.call_user_callback();
+    if should_render == sys::YES {
+        window.call_user_callback();
+    }
 }
 
 impl CocoaWindow {

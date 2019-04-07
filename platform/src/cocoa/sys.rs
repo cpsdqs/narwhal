@@ -10,7 +10,7 @@ use cocoa_ffi::appkit::CGFloat;
 use cocoa_ffi::appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular;
 use cocoa_ffi::base::{id, nil};
 pub use cocoa_ffi::foundation::{NSInteger, NSPoint, NSRect, NSSize, NSUInteger};
-use objc::runtime::*;
+pub use objc::runtime::*;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_float;
 use std::{slice, str};
@@ -312,7 +312,7 @@ pub struct NCWindowCallbackData {
 }
 
 impl NCWindow {
-    pub fn new(content_rect: NSRect, callback: extern "C" fn(NCWindow)) -> NCWindow {
+    pub fn new(content_rect: NSRect, callback: extern "C" fn(NCWindow, BOOL, BOOL)) -> NCWindow {
         unsafe {
             let i: id = msg_send![&OBJC_NCWindow, alloc];
             let obj = msg_send![i, initWithContentRect:content_rect

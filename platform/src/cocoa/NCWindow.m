@@ -30,7 +30,7 @@ CVReturn displayLinkCallback(
 @synthesize callbackData;
 
 - (instancetype)initWithContentRect:(NSRect)contentRect
-                           callback:(void (*)(NCWindow*))callbackFn {
+                           callback:(void (*)(NCWindow*, BOOL, BOOL))callbackFn {
     self = [super initWithContentRect:contentRect
                      styleMask:NSWindowStyleMaskTitled
                              | NSWindowStyleMaskClosable
@@ -72,9 +72,9 @@ CVReturn displayLinkCallback(
     return self;
 }
 
-- (void)doCallback {
+- (void)doCallbackWithMainThread:(BOOL)isOnMainThread shouldRender:(BOOL)shouldRender {
     if (callback != nil) {
-        callback(self);
+        callback(self, isOnMainThread, shouldRender);
     }
 }
 
@@ -88,7 +88,7 @@ CVReturn displayLinkCallback(
 }
 
 - (void)handleFrame {
-    [self doCallback];
+    [self doCallbackWithMainThread:NO shouldRender:YES];
 
     if (syncTimeout > 0) {
         syncTimeout -= 1;
@@ -104,6 +104,7 @@ CVReturn displayLinkCallback(
     windowEvent.eventType = NCWindowEventTypeNSEvent;
     windowEvent.event = event;
     [events addObject:windowEvent];
+    [self doCallbackWithMainThread:YES shouldRender:NO];
     [self requestFrame];
 }
 
@@ -112,7 +113,7 @@ CVReturn displayLinkCallback(
     NCWindowEvent *windowEvent = [[NCWindowEvent alloc] init];
     windowEvent.eventType = eventType;
     [events addObject:windowEvent];
-    [self doCallback];
+    [self doCallbackWithMainThread:YES shouldRender:YES];
 }
 
 - (void)sendEvent:(NSEvent*)event {

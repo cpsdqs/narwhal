@@ -23,7 +23,7 @@ typedef struct {
 
 @interface NCWindow : NSWindow <NSWindowDelegate> {
     NSMutableArray *events;
-    void (*callback)(NCWindow *);
+    void (*callback)(NCWindow *, BOOL, BOOL);
     BOOL didSendReady;
     BOOL shouldSendReadyOnUpdate;
     unsigned int syncTimeout;
@@ -35,7 +35,7 @@ typedef struct {
 @property (nonatomic) NCWindowCallbackData callbackData;
 
 - (instancetype)initWithContentRect:(NSRect)contentRect
-                           callback:(void (*)(NCWindow*))callbackFn;
+                           callback:(void (*)(NCWindow*, BOOL, BOOL))callbackFn;
 - (NCWindowEvent *)dequeueEvent;
 - (void)setDevice:(id<MTLDevice>)device;
 - (void)requestFrame;
