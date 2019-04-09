@@ -132,7 +132,7 @@ impl Window {
     }
 
     /// Returns a mutable reference to the user data.
-    pub fn data(&mut self) -> impl DerefMut<Target = Box<dyn Any + Send + Sync>> {
+    pub fn data(&mut self) -> impl DerefMut<Target = Box<dyn Any + Send>> {
         self.0.data()
     }
 

@@ -238,7 +238,7 @@ pub(crate) struct CocoaWindow {
     callback: Box<WindowCallback>,
 
     /// User data; won’t be touched by anything in this crate.
-    pub data: Mutex<Box<Any + Send + Sync>>,
+    pub data: Mutex<Box<Any + Send>>,
 }
 
 pub(crate) type InnerWindow = Pin<Box<CocoaWindow>>;
@@ -292,7 +292,7 @@ impl CocoaWindow {
         Drain(self)
     }
 
-    pub(crate) fn data(&mut self) -> impl DerefMut<Target = Box<dyn Any + Send + Sync>> {
+    pub(crate) fn data(&mut self) -> impl DerefMut<Target = Box<dyn Any + Send>> {
         self.data.lock()
     }
 

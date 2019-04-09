@@ -1,5 +1,6 @@
 #import "NCAppDelegate.h"
 
+// TODO: listen for this event and provide an API for this
 void NCWakeApplication() {
     @autoreleasepool {
         NSEvent *event = [NSEvent otherEventWithType:NSApplicationDefined
@@ -56,7 +57,6 @@ void NCWakeApplication() {
     if (callback != nil) {
         callback(self);
     }
-    NCWakeApplication();
 }
 
 - (void)pushAppEvent:(NCAppEventType)eventType {
