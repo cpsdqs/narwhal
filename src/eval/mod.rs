@@ -180,6 +180,9 @@ pub trait DataNode: Send + Sync {
     fn is_pure(&self) -> bool {
         true
     }
+
+    /// Clears caches, if any.
+    fn clear_caches(&mut self) {}
 }
 
 /// A graphics node with access to the command buffer.
@@ -196,18 +199,33 @@ pub trait GraphicsNode: Send + Sync {
     /// Optionally modifies the given context for the input nodes, if, for example, only a small
     /// region of an input texture is required.
     fn map_context(&self, _context: &mut Context) {}
+
+    /// Clears caches, if any.
+    fn clear_caches(&mut self) {}
 }
 
 /// A shared data node type that may hold shared data and can create data nodes.
 pub trait SharedDataType: Send + Sync {
+    /// Returns the unique name.
     fn name(&self) -> String;
+
+    /// Creates a new node.
     fn create(&mut self) -> Box<dyn DataNode>;
+
+    /// Clears caches, if any.
+    fn clear_caches(&mut self) {}
 }
 
 /// A shared data node type that may hold shared data (such as shaders) and can create data nodes.
 pub trait SharedGraphicsType: Send + Sync {
+    /// Returns the unique name.
     fn name(&self) -> String;
+
+    /// Creates a new node.
     fn create(&mut self) -> Box<dyn GraphicsNode>;
+
+    /// Clears caches, if any.
+    fn clear_caches(&mut self) {}
 }
 
 /// A node type definition, holding functions that create a shared node type.

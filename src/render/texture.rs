@@ -164,6 +164,11 @@ impl TexturePool {
 
         Ok(self.sizes[&key].last().unwrap().clone())
     }
+
+    /// Clears all caches.
+    pub fn clear_caches(&mut self) {
+        self.sizes.clear();
+    }
 }
 
 #[derive(Debug, Fail)]

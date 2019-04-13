@@ -778,4 +778,12 @@ impl<ID: Copy + Hash + Eq> ShapeRasterizer<ID> {
             self.shape_ds_cache.remove(&key);
         }
     }
+
+    /// Clears all caches.
+    pub fn clear_caches(&mut self) {
+        self.cache.clear();
+        self.global_cache.clear();
+        self.shape_uniform_cache.clear();
+        self.shape_ds_cache.clear();
+    }
 }

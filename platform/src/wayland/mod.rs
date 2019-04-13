@@ -1,12 +1,13 @@
-use std::ops::{Deref, DerefMut};
-use std::collections::VecDeque;
-use std::pin::Pin;
-use crate::{App, AppCallback, Window, WindowCallback};
 use crate::event::{AppEvent, WindowEvent};
+use crate::{App, AppCallback, Window, WindowCallback};
 use cgmath::Vector2;
+use lazy_static::lazy_static;
 use smithay_client_toolkit::{Environment, Shell};
 use std::any::Any;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
@@ -24,7 +25,6 @@ use wayland_protocols::xdg_shell::client::xdg_toplevel::{
     Event as XdgToplevelEvent, RequestsTrait as XdgToplevelReq, XdgToplevel,
 };
 use wayland_protocols::xdg_shell::client::xdg_wm_base::RequestsTrait as XdgWmBaseReq;
-use lazy_static::lazy_static;
 
 mod input_handler;
 
@@ -73,7 +73,11 @@ pub(crate) struct WaylandApp {
 
 pub(crate) type InnerApp = WaylandApp;
 
-pub(crate) fn init_app(name: &str, version: (u16, u16, u16), callback: Box<AppCallback>) -> WaylandApp {
+pub(crate) fn init_app(
+    name: &str,
+    version: (u16, u16, u16),
+    callback: Box<AppCallback>,
+) -> WaylandApp {
     {
         let mut did_init = DID_INIT_APP.lock().unwrap();
         if *did_init {
@@ -91,35 +95,34 @@ pub(crate) fn init_app(name: &str, version: (u16, u16, u16), callback: Box<AppCa
 
     let mut input_handler = input_handler::InputHandler::new(update_send.clone());
 
-    let environment = Environment::from_display_with_cb(
-        &display,
-        &mut event_queue,
-        move |event, registry| match event {
-            GlobalEvent::New {
-                id,
-                interface,
-                version,
-            } => {
-                println!("new global: {} v{}", interface, version);
-                match &*interface {
-                    "wl_seat" => input_handler.add_seat(id, version, &registry),
-                    "zwp_tablet_manager_v2" => {
-                        input_handler.add_tablet_manager(id, version, &registry)
+    let environment =
+        Environment::from_display_with_cb(&display, &mut event_queue, move |event, registry| {
+            match event {
+                GlobalEvent::New {
+                    id,
+                    interface,
+                    version,
+                } => {
+                    println!("new global: {} v{}", interface, version);
+                    match &*interface {
+                        "wl_seat" => input_handler.add_seat(id, version, &registry),
+                        "zwp_tablet_manager_v2" => {
+                            input_handler.add_tablet_manager(id, version, &registry)
+                        }
+                        _ => (),
                     }
-                    _ => (),
+                }
+                GlobalEvent::Removed { id, interface } => {
+                    match &*interface {
+                        "wl_seat" => input_handler.remove_seat(id),
+                        "zwp_tablet_manager_v2" => input_handler.remove_tablet_manager(id),
+                        _ => (),
+                    }
+                    println!("global removed: {}", interface);
                 }
             }
-            GlobalEvent::Removed { id, interface } => {
-                match &*interface {
-                    "wl_seat" => input_handler.remove_seat(id),
-                    "zwp_tablet_manager_v2" => input_handler.remove_tablet_manager(id),
-                    _ => (),
-                }
-                println!("global removed: {}", interface);
-            }
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
 
     let instance = Instance::new(
         Some(&ApplicationInfo {
@@ -240,11 +243,11 @@ impl WaylandApp {
             for ((window_id, time), index) in self.callbacks.iter().zip(0..) {
                 if time <= &now {
                     /* self.update_send
-                        .send(WindowUpdate {
-                            id: *window_id,
-                            update: Update::Event(WindowEvent::Scheduled),
-                        })
-                        .unwrap(); */
+                    .send(WindowUpdate {
+                        id: *window_id,
+                        update: Update::Event(WindowEvent::Scheduled),
+                    })
+                    .unwrap(); */
                     callbacks_to_remove.push(index);
                 } else {
                     break;
@@ -298,7 +301,12 @@ impl WaylandApp {
         }
     }
 
-    pub(crate) fn create_window(&mut self, width: u16, height: u16, callback: Box<WindowCallback>) -> Pin<Box<WaylandWindow>> {
+    pub(crate) fn create_window(
+        &mut self,
+        width: u16,
+        height: u16,
+        callback: Box<WindowCallback>,
+    ) -> Pin<Box<WaylandWindow>> {
         let surface = self
             .environment
             .compositor

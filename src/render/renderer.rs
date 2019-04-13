@@ -30,6 +30,13 @@ impl NodeType {
             NodeType::Graphics(graphics) => graphics.name(),
         }
     }
+
+    fn clear_caches(&mut self) {
+        match self {
+            NodeType::Data(data) => data.clear_caches(),
+            NodeType::Graphics(graphics) => graphics.clear_caches(),
+        }
+    }
 }
 
 enum NodeInstance {
@@ -38,24 +45,31 @@ enum NodeInstance {
 }
 
 impl NodeInstance {
-    pub fn wants_rasterized(&self) -> bool {
+    fn wants_rasterized(&self) -> bool {
         match self {
             NodeInstance::Graphics(_) => true,
             NodeInstance::Data(_) => false,
         }
     }
 
-    pub fn is_contextful(&self) -> bool {
+    fn is_contextful(&self) -> bool {
         match self {
             NodeInstance::Graphics(_) => true,
             NodeInstance::Data(_) => false,
         }
     }
 
-    pub fn is_impure(&self) -> bool {
+    fn is_impure(&self) -> bool {
         match self {
             NodeInstance::Graphics(_) => false,
             NodeInstance::Data(data) => !data.is_pure(),
+        }
+    }
+
+    fn clear_caches(&mut self) {
+        match self {
+            NodeInstance::Graphics(graphics) => graphics.clear_caches(),
+            NodeInstance::Data(data) => data.clear_caches(),
         }
     }
 }
@@ -304,6 +318,7 @@ impl Renderer {
         Ok(inputs)
     }
 
+    /// Recursively propagates node contexts.
     fn propagate_contexts(
         &mut self,
         node_ref: NodeRef,
@@ -564,10 +579,8 @@ impl Renderer {
             self.shape_rasterizer.drop_unused();
             self.texture_pool.drop_unused();
 
-            let mut unused_nodes = FnvHashSet::default();
-            for k in self.cache.keys().chain(self.nodes.keys()) {
-                unused_nodes.insert(*k);
-            }
+            let mut unused_nodes: FnvHashSet<_> =
+                self.cache.keys().chain(self.nodes.keys()).map(|k| *k).collect();
 
             for node in order {
                 unused_nodes.remove(&node);
@@ -594,6 +607,7 @@ impl Renderer {
         }
     }
 
+    /// Rasterizes the given drawables into a new texture.
     fn rasterize_drawables(
         &mut self,
         drawables: &[Drawable],
@@ -673,5 +687,21 @@ impl Renderer {
             Arc::clone(&self.device),
             self.queue.family(),
         )
+    }
+
+    /// Drops all caches or other ‘inessential data’ such as buffers and textures.
+    pub fn clear_caches(&mut self) {
+        self.shape_rasterizer.clear_caches();
+        self.texture_pool.clear_caches();
+        self.ctx_cache.clear();
+        self.cache.clear();
+
+        for (_, node_type) in &mut self.node_types {
+            node_type.clear_caches();
+        }
+
+        for (_, node_instance) in &mut self.nodes {
+            node_instance.clear_caches();
+        }
     }
 }
